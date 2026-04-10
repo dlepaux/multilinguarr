@@ -1,0 +1,23 @@
+{
+  "name": "multilinguarr-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "copy:markdown": "cp ../contributing.md . && cp ../license.md .",
+    "dev": "npm run copy:markdown && vitepress dev",
+    "build:brand": "npx tsx scripts/generate-brand.ts",
+    "build:favicon": "npx realfavicon generate ../brand/favicon.svg favicon-settings.json favicon.json public/favicon",
+    "build:openapi": "cd .. && cargo run -- openapi > docs/public/openapi.json",
+    "build": "npm run copy:markdown && npm run build:brand && npm run build:favicon && npm run build:openapi && vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "@scalar/api-reference": "^1.51.0",
+    "@types/node": "^25.5.2",
+    "opentype.js": "^1.3.4",
+    "sharp": "^0.34.5",
+    "tsx": "^4.21.0",
+    "vitepress": "^1.6.4",
+    "vue": "^3.5.13"
+  }
+}

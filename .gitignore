@@ -1,0 +1,29 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local logs / scratch
+logs/
+tmp/
+
+# Generated e2e test fixtures
+tests/media/
+
+# Node (semantic-release only)
+node_modules/
+
+# Local plan (not committed)
+plan/
