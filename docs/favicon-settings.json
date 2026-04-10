@@ -1,0 +1,35 @@
+{
+  "icon": {
+    "desktop": {
+      "regularIconTransformation": {
+        "type": "background",
+        "backgroundColor": "#e05db5",
+        "backgroundRadius": 1,
+        "imageScale": 0.7
+      },
+      "darkIconType": "none"
+    },
+    "touch": {
+      "transformation": {
+        "type": "background",
+        "backgroundColor": "#e05db5",
+        "backgroundRadius": 0,
+        "imageScale": 0.7
+      },
+      "appTitle": "multilinguarr"
+    },
+    "webAppManifest": {
+      "transformation": {
+        "type": "background",
+        "backgroundColor": "#e05db5",
+        "backgroundRadius": 0,
+        "imageScale": 0.7
+      },
+      "backgroundColor": "#ffffff",
+      "name": "multilinguarr",
+      "shortName": "mlq",
+      "themeColor": "#e05db5"
+    }
+  },
+  "path": "/multilinguarr/favicon/"
+}
