@@ -273,6 +273,17 @@ async fn classify_status(
             status: code,
             body,
         })
+    } else if status == StatusCode::CONFLICT {
+        // 409 is structurally distinct from generic 4xx: callers
+        // implement idempotent retries (lookup-by-external-id then
+        // promote to AlreadyExisted) on this variant only. Branch
+        // here BEFORE the generic Client path so the type carries
+        // the signal — no body-string matching at the call site.
+        Err(ArrError::Conflict {
+            instance: instance.to_owned(),
+            endpoint: endpoint.to_owned(),
+            body,
+        })
     } else {
         Err(ArrError::Client {
             instance: instance.to_owned(),
