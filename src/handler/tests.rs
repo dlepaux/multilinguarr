@@ -1423,6 +1423,72 @@ async fn sonarr_fallback_no_language_tags_increments_counter() {
 }
 
 // =====================================================================
+// Wrong-language skip counter
+// =====================================================================
+
+#[tokio::test]
+async fn radarr_wrong_language_alternate_increments_counter() {
+    let rig = Rig::new().await;
+    // EN-alternate instance; file contains only French audio.
+    let folder = rig.alt_storage.join("FR Film (2024)");
+    write_movie_file(&folder, "fr").await;
+
+    let cfg = rig.config_radarr();
+    let alternate = cfg.instances[1].clone(); // radarr-en
+    let file_path = folder.join("movie.mkv");
+    let event = radarr_download_event(folder.to_str().unwrap(), file_path.to_str().unwrap());
+    let registry = Rig::registry(cfg, fr_only_streams());
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    handle_radarr_download(&alternate, &event, &registry)
+        .await
+        .unwrap();
+
+    drop(recorder_guard);
+    let render = handle.render();
+    assert!(
+        render.contains(
+            "multilinguarr_wrong_language_skip_total{instance=\"radarr-en\",source=\"radarr\",expected_language=\"en\",detected_language=\"fr\"} 1"
+        ),
+        "expected wrong-language counter with radarr labels in:\n{render}"
+    );
+}
+
+#[tokio::test]
+async fn sonarr_wrong_language_alternate_increments_counter() {
+    let rig = Rig::new().await;
+    // EN-alternate sonarr instance; episode contains only French audio.
+    let series_dir = rig.alt_storage.join("Show");
+    write_episode_file(&series_dir, "fr").await;
+
+    let cfg = rig.config_sonarr();
+    let alternate = cfg.instances[1].clone(); // sonarr-en
+    let episode_path = series_dir.join("Season 01/S01E01.mkv");
+    let event = sonarr_download_event(series_dir.to_str().unwrap(), episode_path.to_str().unwrap());
+    let registry = Rig::registry(cfg, fr_only_streams());
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    handle_sonarr_download(&alternate, &event, &registry)
+        .await
+        .unwrap();
+
+    drop(recorder_guard);
+    let render = handle.render();
+    assert!(
+        render.contains(
+            "multilinguarr_wrong_language_skip_total{instance=\"sonarr-en\",source=\"sonarr\",expected_language=\"en\",detected_language=\"fr\"} 1"
+        ),
+        "expected wrong-language counter with sonarr labels in:\n{render}"
+    );
+}
+
+// =====================================================================
 // HandlerError classification
 // =====================================================================
 

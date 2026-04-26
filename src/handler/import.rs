@@ -176,6 +176,21 @@ async fn link_radarr_alternate<P: FfprobeProber>(
             detected = ?detection.languages,
             "alternate instance imported a file that does not contain its own language — skipping"
         );
+        let mut detected_sorted: Vec<&String> = detection.languages.iter().collect();
+        detected_sorted.sort();
+        let detected_label = detected_sorted
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        metrics::counter!(
+            crate::observability::names::WRONG_LANGUAGE_SKIP,
+            "instance" => alternate.name.clone(),
+            "source" => source_label(alternate.kind),
+            "expected_language" => alternate.language.clone(),
+            "detected_language" => detected_label,
+        )
+        .increment(1);
         return Ok(());
     }
     let mgr = registry.link_manager(&alternate.name)?;
@@ -362,6 +377,21 @@ async fn link_sonarr_alternate<P: FfprobeProber>(
             detected = ?detection.languages,
             "alternate sonarr imported file that does not contain its own language — skipping"
         );
+        let mut detected_sorted: Vec<&String> = detection.languages.iter().collect();
+        detected_sorted.sort();
+        let detected_label = detected_sorted
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        metrics::counter!(
+            crate::observability::names::WRONG_LANGUAGE_SKIP,
+            "instance" => alternate.name.clone(),
+            "source" => source_label(alternate.kind),
+            "expected_language" => alternate.language.clone(),
+            "detected_language" => detected_label,
+        )
+        .increment(1);
         return Ok(());
     }
     let mgr = registry.link_manager(&alternate.name)?;
