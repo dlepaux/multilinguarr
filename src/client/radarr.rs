@@ -106,32 +106,15 @@ impl RadarrClient {
         Ok(movies.into_iter().next())
     }
 
-    /// Add a movie to the Radarr instance.
-    ///
-    /// Idempotent under the cross-instance webhook race: when N parallel
-    /// callers POST the same `tmdb_id`, a database UNIQUE constraint
-    /// race lets exactly one win with 201 and returns 409 to the others.
-    /// The losers must treat their 409 as success (the resource they
-    /// wanted now exists), not as a hard error — otherwise their
-    /// downstream work is dropped silently.
-    ///
-    /// Implementation: on `ArrError::Conflict`, follow up with
-    /// `get_movie_by_tmdb_id`. If the matching record exists, return
-    /// `AddOutcome::AlreadyExisted`. If it does not, the 409 was for a
-    /// *different* unique constraint; propagate the original
-    /// `ArrError::Conflict` so the operator can resolve manually.
-    ///
-    /// Note: modern Radarr (v3+) typically returns 400 from
-    /// `MovieExistsValidator` *before* hitting the DB INSERT, so the
-    /// 409 path may rarely fire in practice. The wrapper is symmetric
-    /// with Sonarr regardless — when the next real Radarr 409 lands in
-    /// production, tighten the test against the captured wire body.
+    /// Add a movie. 409 on POST is resolved via `get_movie_by_tmdb_id`
+    /// and returned as `AddOutcome::AlreadyExisted`; if the lookup
+    /// finds nothing the 409 propagates (different unique constraint).
+    /// Modern Radarr usually returns 400 here instead of 409, so the
+    /// 409 path is symmetric-with-Sonarr insurance.
     ///
     /// # Errors
     ///
     /// Returns `ArrError` on network, HTTP, or deserialization failure.
-    /// `ArrError::Conflict` only surfaces when a 409 fires for a
-    /// constraint other than the `tmdb_id`-resolvable one.
     pub async fn add_movie(
         &self,
         req: &AddMovieRequest,

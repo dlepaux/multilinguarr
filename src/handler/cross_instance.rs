@@ -24,20 +24,12 @@ use crate::detection::FfprobeProber;
 use crate::observability::names::CROSS_INSTANCE_ADD;
 use crate::webhook::{RadarrMovieRef, SonarrSeriesRef};
 
-/// Label values for the `outcome` dimension of `CROSS_INSTANCE_ADD`.
-/// Centralised here so the closed set of label values is reviewable
-/// in one place — keeps Prometheus cardinality bounded and enforces
-/// a single naming convention across the two engines.
+// Closed set of `outcome` label values — keeps Prometheus cardinality
+// bounded.
 const OUTCOME_CREATED: &str = "created";
 const OUTCOME_ALREADY_EXISTED: &str = "already_existed";
 const OUTCOME_ERROR: &str = "error";
 
-/// Increment the `multilinguarr_cross_instance_add_total` counter.
-///
-/// Three label dimensions: `instance` (source), `target` (destination
-/// instance), `outcome` ∈ {`created`, `already_existed`, `error`}.
-/// Both source and target names are sourced from `instances.toml` so
-/// cardinality is bounded by configuration.
 fn record_add_outcome(source: &str, target: &str, outcome: &'static str) {
     metrics::counter!(
         CROSS_INSTANCE_ADD,
@@ -76,10 +68,8 @@ pub async fn propagate_add_movie<P: FfprobeProber>(
             continue;
         };
 
-        // GET-precheck: kept as a latency optimisation that avoids
-        // the cosmetic 409 round-trip in the common case. The
-        // `add_movie` wrapper now also handles 409 idempotently, so
-        // this branch is no longer load-bearing for correctness.
+        // Optimisation: skip the POST→409 round-trip when we already
+        // know the movie exists. Correctness no longer depends on it.
         if let Some(existing) = target_radarr
             .get_movie_by_tmdb_id(movie_ref.tmdb_id)
             .await?
@@ -146,10 +136,6 @@ pub async fn propagate_add_movie<P: FfprobeProber>(
     Ok(())
 }
 
-/// Fetch the source instance's season-monitoring map so the per-target
-/// add can copy it across. Returns an empty vec (and logs a warning)
-/// when the source has no record of the series — the targets will
-/// monitor nothing extra, which is the safe default.
 async fn fetch_source_seasons(
     source_sonarr: &crate::client::SonarrClient,
     source_name: &str,
@@ -174,10 +160,6 @@ async fn fetch_source_seasons(
     }
 }
 
-/// One target's worth of cross-instance series-add work. Extracted so
-/// `propagate_add_series` stays under the function-length lint and so
-/// the GET-precheck + add + outcome-meter logic is reviewable in
-/// isolation.
 async fn add_series_to_target(
     source_instance: &InstanceConfig,
     target: &InstanceConfig,
@@ -185,10 +167,8 @@ async fn add_series_to_target(
     series_ref: &SonarrSeriesRef,
     seasons: &[SeasonInfo],
 ) -> Result<(), HandlerError> {
-    // GET-precheck: latency optimisation that avoids the cosmetic 409
-    // round-trip in the common case. The `add_series` wrapper now also
-    // handles 409 idempotently, so this branch is no longer
-    // load-bearing for correctness.
+    // Optimisation: skip the POST→409 round-trip when we already
+    // know the series exists. Correctness no longer depends on it.
     if let Some(existing) = target_sonarr
         .get_series_by_tvdb_id(series_ref.tvdb_id)
         .await?

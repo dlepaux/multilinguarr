@@ -366,25 +366,10 @@ impl Respond for CountingResponder {
 }
 
 // ---------------- 409 race regression ----------------
-//
-// Reproduces the cross-instance webhook race: when N concurrent
-// `add_series` (or `add_movie`) calls hit the same external id
-// (`tvdb_id` / `tmdb_id`), the database UNIQUE constraint lets
-// exactly one win with 201 and returns 409 to the others. Callers
-// must observe N successful outcomes (1 Created + N-1 AlreadyExisted),
-// never a hard error — otherwise the losers silently drop downstream
-// cross-library link work.
 
-/// Body shape Sonarr returns when its `Series.TitleSlug` UNIQUE
-/// constraint fires. The classifier branches on status==409, not on
-/// the body — this constant exists so the test responder can mimic
-/// the wire payload faithfully (debug, logs, error chains).
 const SONARR_TITLE_SLUG_409_BODY: &str = r#"[{"propertyName":"TitleSlug","errorMessage":"constraint failed\nUNIQUE constraint failed: Series.TitleSlug","errorCode":"DbUpdateException","severity":"error"}]"#;
 
-/// Synthesised Radarr-style 409 body. Modern Radarr usually returns
-/// 400 from `MovieExistsValidator` before the DB INSERT, so the wire
-/// shape of a real Radarr 409 is unverified — when one fires in
-/// production, capture and tighten this string.
+// Synthesised — real Radarr usually returns 400, not 409.
 const RADARR_TMDB_409_BODY: &str = r#"[{"propertyName":"TmdbId","errorMessage":"UNIQUE constraint failed: Movies.TmdbId","errorCode":"DbUpdateException","severity":"error"}]"#;
 
 fn add_series_request(tvdb_id: u32) -> AddSeriesRequest {
@@ -417,10 +402,9 @@ fn add_movie_request(tmdb_id: u32) -> AddMovieRequest {
     }
 }
 
-/// A wiremock responder that returns 201 (Created) for the **first**
-/// caller and 409 (UNIQUE constraint) for every subsequent caller.
-/// Determinism comes from `AtomicU32::fetch_add`, NOT from wiremock's
-/// arrival order — whichever Tokio task lands `0` is the winner.
+// First caller (AtomicU32==0) wins with 201; everyone else gets 409.
+// Determinism comes from fetch_add, not wiremock arrival order — no
+// scheduling flake.
 struct OneCreatedThenConflictResponder {
     counter: Arc<AtomicU32>,
     created_body: serde_json::Value,
@@ -484,11 +468,6 @@ async fn add_series_first_call_returns_created_subsequent_409_become_already_exi
     assert!(matches!(third, AddOutcome::AlreadyExisted(ref s) if s.id == 21));
 }
 
-/// Concurrent regression test for the cross-instance 409 race.
-///
-/// Idempotent semantics demand: N concurrent `add_series` calls for
-/// the same series → exactly 1 Created + N-1 AlreadyExisted, 0 errors.
-/// Pre-fix, this asserted 1 ok / 3 err — the silent-data-loss bug.
 #[tokio::test]
 async fn concurrent_add_series_one_created_n_minus_1_already_existed() {
     let server = MockServer::start().await;
@@ -526,9 +505,6 @@ async fn concurrent_add_series_one_created_n_minus_1_already_existed() {
     )));
     let req = add_series_request(tvdb_id);
 
-    // 4 concurrent adds. Whichever Tokio task lands AtomicU32==0 is the
-    // Created winner; the other three race onto 409 and recover via
-    // get_series_by_tvdb_id → AlreadyExisted.
     let (r1, r2, r3, r4) = tokio::join!(
         {
             let c = Arc::clone(&client);
@@ -578,9 +554,7 @@ async fn add_series_409_with_unrelated_constraint_propagates_error() {
         .respond_with(ResponseTemplate::new(409).set_body_string(SONARR_TITLE_SLUG_409_BODY))
         .mount(&server)
         .await;
-    // GET-by-tvdbId returns empty → the 409 was for a *different*
-    // unique constraint (e.g. true title-slug collision between two
-    // genuinely different shows). Propagate as Conflict.
+    // GET returns empty → unrelated constraint, Conflict propagates.
     Mock::given(method("GET"))
         .and(path("/api/v3/series"))
         .and(query_param("tvdbId", tvdb_id.to_string().as_str()))

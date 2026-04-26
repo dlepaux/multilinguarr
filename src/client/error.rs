@@ -51,17 +51,10 @@ pub enum ArrError {
         body: String,
     },
 
-    /// A 409 Conflict — the resource already exists or violates a unique
-    /// constraint. Structurally distinct from generic 4xx so callers can
-    /// implement idempotent semantics (treat 409 on add as "already
-    /// exists" after a follow-up lookup confirms the existing record).
-    ///
-    /// Permanent at the wire level — retrying a 409 will keep returning
-    /// 409. The client wrapper layer (`add_series`, `add_movie`) absorbs
-    /// this into `AddOutcome::AlreadyExisted` for the common case of a
-    /// cross-instance add race; the variant only surfaces to the handler
-    /// when a 409 fires for a *different* unique constraint than the one
-    /// the lookup-by-external-id would resolve.
+    /// 409 Conflict. Split from `Client` so callers can implement
+    /// idempotent retries structurally (no body-string matching).
+    /// Permanent — wrappers absorb it into `AddOutcome::AlreadyExisted`
+    /// for the cross-instance add case.
     #[error("conflict 409 from `{instance}` on `{endpoint}`: {body}")]
     Conflict {
         instance: String,

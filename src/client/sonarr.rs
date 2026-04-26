@@ -118,29 +118,13 @@ impl SonarrClient {
         Ok(series.into_iter().next())
     }
 
-    /// Add a series to the Sonarr instance.
-    ///
-    /// Idempotent under the cross-instance webhook race: when N parallel
-    /// callers POST the same `tvdb_id`, the database UNIQUE constraint
-    /// on `Series.TitleSlug` lets exactly one win with 201 and returns
-    /// 409 to the others. The losers must treat their 409 as success
-    /// (the resource they wanted now exists), not as a hard error —
-    /// otherwise their downstream work (cross-library linking, Jellyfin
-    /// refresh) is dropped silently.
-    ///
-    /// Implementation: on `ArrError::Conflict`, follow up with
-    /// `get_series_by_tvdb_id`. If the matching record exists, return
-    /// `AddOutcome::AlreadyExisted`. If it does not, the 409 was for a
-    /// *different* unique constraint (e.g. a true title-slug collision
-    /// between two genuinely different shows that resolve to the same
-    /// slug); propagate the original `ArrError::Conflict` so the
-    /// operator can resolve manually.
+    /// Add a series. 409 on POST is resolved via `get_series_by_tvdb_id`
+    /// and returned as `AddOutcome::AlreadyExisted`; if the lookup
+    /// finds nothing the 409 propagates (different unique constraint).
     ///
     /// # Errors
     ///
     /// Returns `ArrError` on network, HTTP, or deserialization failure.
-    /// `ArrError::Conflict` only surfaces when a 409 fires for a
-    /// constraint other than the `tvdb_id`-resolvable one.
     pub async fn add_series(
         &self,
         req: &AddSeriesRequest,
