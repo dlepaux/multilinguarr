@@ -1669,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "multilinguarr"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "assert_fs",
  "axum",
