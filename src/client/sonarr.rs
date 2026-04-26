@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::common::{CustomFormat, Language, MediaQuality, QualityProfile, RootFolder};
+use super::common::{AddOutcome, CustomFormat, Language, MediaQuality, QualityProfile, RootFolder};
 use super::error::ArrError;
 use super::http::HttpCore;
 
@@ -120,11 +120,51 @@ impl SonarrClient {
 
     /// Add a series to the Sonarr instance.
     ///
+    /// Idempotent under the cross-instance webhook race: when N parallel
+    /// callers POST the same `tvdb_id`, the database UNIQUE constraint
+    /// on `Series.TitleSlug` lets exactly one win with 201 and returns
+    /// 409 to the others. The losers must treat their 409 as success
+    /// (the resource they wanted now exists), not as a hard error —
+    /// otherwise their downstream work (cross-library linking, Jellyfin
+    /// refresh) is dropped silently.
+    ///
+    /// Implementation: on `ArrError::Conflict`, follow up with
+    /// `get_series_by_tvdb_id`. If the matching record exists, return
+    /// `AddOutcome::AlreadyExisted`. If it does not, the 409 was for a
+    /// *different* unique constraint (e.g. a true title-slug collision
+    /// between two genuinely different shows that resolve to the same
+    /// slug); propagate the original `ArrError::Conflict` so the
+    /// operator can resolve manually.
+    ///
     /// # Errors
     ///
     /// Returns `ArrError` on network, HTTP, or deserialization failure.
-    pub async fn add_series(&self, req: &AddSeriesRequest) -> Result<SonarrSeries, ArrError> {
-        self.http.post_json(PATH_SERIES, req).await
+    /// `ArrError::Conflict` only surfaces when a 409 fires for a
+    /// constraint other than the `tvdb_id`-resolvable one.
+    pub async fn add_series(
+        &self,
+        req: &AddSeriesRequest,
+    ) -> Result<AddOutcome<SonarrSeries>, ArrError> {
+        match self
+            .http
+            .post_json::<_, SonarrSeries>(PATH_SERIES, req)
+            .await
+        {
+            Ok(series) => Ok(AddOutcome::Created(series)),
+            Err(ArrError::Conflict {
+                instance,
+                endpoint,
+                body,
+            }) => match self.get_series_by_tvdb_id(req.tvdb_id).await? {
+                Some(existing) => Ok(AddOutcome::AlreadyExisted(existing)),
+                None => Err(ArrError::Conflict {
+                    instance,
+                    endpoint,
+                    body,
+                }),
+            },
+            Err(err) => Err(err),
+        }
     }
 
     /// Delete a series by its Sonarr internal id.

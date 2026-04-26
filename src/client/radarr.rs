@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::common::{CustomFormat, Language, MediaQuality, QualityProfile, RootFolder};
+use super::common::{AddOutcome, CustomFormat, Language, MediaQuality, QualityProfile, RootFolder};
 use super::error::ArrError;
 use super::http::HttpCore;
 
@@ -108,11 +108,50 @@ impl RadarrClient {
 
     /// Add a movie to the Radarr instance.
     ///
+    /// Idempotent under the cross-instance webhook race: when N parallel
+    /// callers POST the same `tmdb_id`, a database UNIQUE constraint
+    /// race lets exactly one win with 201 and returns 409 to the others.
+    /// The losers must treat their 409 as success (the resource they
+    /// wanted now exists), not as a hard error — otherwise their
+    /// downstream work is dropped silently.
+    ///
+    /// Implementation: on `ArrError::Conflict`, follow up with
+    /// `get_movie_by_tmdb_id`. If the matching record exists, return
+    /// `AddOutcome::AlreadyExisted`. If it does not, the 409 was for a
+    /// *different* unique constraint; propagate the original
+    /// `ArrError::Conflict` so the operator can resolve manually.
+    ///
+    /// Note: modern Radarr (v3+) typically returns 400 from
+    /// `MovieExistsValidator` *before* hitting the DB INSERT, so the
+    /// 409 path may rarely fire in practice. The wrapper is symmetric
+    /// with Sonarr regardless — when the next real Radarr 409 lands in
+    /// production, tighten the test against the captured wire body.
+    ///
     /// # Errors
     ///
     /// Returns `ArrError` on network, HTTP, or deserialization failure.
-    pub async fn add_movie(&self, req: &AddMovieRequest) -> Result<RadarrMovie, ArrError> {
-        self.http.post_json(PATH_MOVIE, req).await
+    /// `ArrError::Conflict` only surfaces when a 409 fires for a
+    /// constraint other than the `tmdb_id`-resolvable one.
+    pub async fn add_movie(
+        &self,
+        req: &AddMovieRequest,
+    ) -> Result<AddOutcome<RadarrMovie>, ArrError> {
+        match self.http.post_json::<_, RadarrMovie>(PATH_MOVIE, req).await {
+            Ok(movie) => Ok(AddOutcome::Created(movie)),
+            Err(ArrError::Conflict {
+                instance,
+                endpoint,
+                body,
+            }) => match self.get_movie_by_tmdb_id(req.tmdb_id).await? {
+                Some(existing) => Ok(AddOutcome::AlreadyExisted(existing)),
+                None => Err(ArrError::Conflict {
+                    instance,
+                    endpoint,
+                    body,
+                }),
+            },
+            Err(err) => Err(err),
+        }
     }
 
     /// Delete a movie by its Radarr internal id.

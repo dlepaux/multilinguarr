@@ -14,7 +14,7 @@ mod sonarr;
 #[cfg(test)]
 mod tests;
 
-pub use common::{Language, QualityProfile, RootFolder};
+pub use common::{AddOutcome, Language, QualityProfile, RootFolder};
 pub use error::ArrError;
 pub use http::{HttpCore, RetryPolicy, DEFAULT_TIMEOUT};
 pub use radarr::{AddMovieOptions, AddMovieRequest, RadarrClient, RadarrMovie};

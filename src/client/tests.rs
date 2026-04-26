@@ -14,8 +14,8 @@ use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use super::{
-    AddMovieOptions, AddMovieRequest, ArrClient, ArrError, HttpCore, RadarrClient, RetryPolicy,
-    SonarrClient,
+    AddMovieOptions, AddMovieRequest, AddOutcome, AddSeriesOptions, AddSeriesRequest, ArrClient,
+    ArrError, HttpCore, RadarrClient, RetryPolicy, SonarrClient,
 };
 use crate::config::{InstanceConfig, InstanceKind, LinkStrategy};
 
@@ -122,8 +122,11 @@ async fn radarr_add_movie_serializes_request_body() {
             search_for_movie: true,
         },
     };
-    let movie = client.add_movie(&req).await.unwrap();
-    assert_eq!(movie.id, 99);
+    let outcome = client.add_movie(&req).await.unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::Created(ref m) if m.id == 99),
+        "expected Created(id=99), got {outcome:?}"
+    );
 }
 
 #[tokio::test]
@@ -360,4 +363,388 @@ impl Respond for CountingResponder {
         self.counter.fetch_add(1, Ordering::SeqCst);
         self.template.clone()
     }
+}
+
+// ---------------- 409 race regression ----------------
+//
+// Reproduces the cross-instance webhook race: when N concurrent
+// `add_series` (or `add_movie`) calls hit the same external id
+// (`tvdb_id` / `tmdb_id`), the database UNIQUE constraint lets
+// exactly one win with 201 and returns 409 to the others. Callers
+// must observe N successful outcomes (1 Created + N-1 AlreadyExisted),
+// never a hard error — otherwise the losers silently drop downstream
+// cross-library link work.
+
+/// Body shape Sonarr returns when its `Series.TitleSlug` UNIQUE
+/// constraint fires. The classifier branches on status==409, not on
+/// the body — this constant exists so the test responder can mimic
+/// the wire payload faithfully (debug, logs, error chains).
+const SONARR_TITLE_SLUG_409_BODY: &str = r#"[{"propertyName":"TitleSlug","errorMessage":"constraint failed\nUNIQUE constraint failed: Series.TitleSlug","errorCode":"DbUpdateException","severity":"error"}]"#;
+
+/// Synthesised Radarr-style 409 body. Modern Radarr usually returns
+/// 400 from `MovieExistsValidator` before the DB INSERT, so the wire
+/// shape of a real Radarr 409 is unverified — when one fires in
+/// production, capture and tighten this string.
+const RADARR_TMDB_409_BODY: &str = r#"[{"propertyName":"TmdbId","errorMessage":"UNIQUE constraint failed: Movies.TmdbId","errorCode":"DbUpdateException","severity":"error"}]"#;
+
+fn add_series_request(tvdb_id: u32) -> AddSeriesRequest {
+    AddSeriesRequest {
+        title: format!("Series {tvdb_id}"),
+        year: Some(2024),
+        tvdb_id,
+        quality_profile_id: 1,
+        root_folder_path: "/tv".to_owned(),
+        season_folder: true,
+        monitored: true,
+        seasons: vec![],
+        add_options: AddSeriesOptions {
+            search_for_missing_episodes: true,
+        },
+    }
+}
+
+fn add_movie_request(tmdb_id: u32) -> AddMovieRequest {
+    AddMovieRequest {
+        title: format!("Movie {tmdb_id}"),
+        year: 2024,
+        tmdb_id,
+        quality_profile_id: 1,
+        root_folder_path: "/movies".to_owned(),
+        monitored: true,
+        add_options: AddMovieOptions {
+            search_for_movie: true,
+        },
+    }
+}
+
+/// A wiremock responder that returns 201 (Created) for the **first**
+/// caller and 409 (UNIQUE constraint) for every subsequent caller.
+/// Determinism comes from `AtomicU32::fetch_add`, NOT from wiremock's
+/// arrival order — whichever Tokio task lands `0` is the winner.
+struct OneCreatedThenConflictResponder {
+    counter: Arc<AtomicU32>,
+    created_body: serde_json::Value,
+    conflict_body: &'static str,
+}
+
+impl Respond for OneCreatedThenConflictResponder {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        let n = self.counter.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            ResponseTemplate::new(201).set_body_json(self.created_body.clone())
+        } else {
+            ResponseTemplate::new(409).set_body_string(self.conflict_body)
+        }
+    }
+}
+
+// ----- Sonarr / add_series -----
+
+#[tokio::test]
+async fn add_series_first_call_returns_created_subsequent_409_become_already_existed() {
+    let server = MockServer::start().await;
+    let tvdb_id: u32 = 468_226;
+    let seeded = json!({
+        "id": 21,
+        "title": "Seeded Series",
+        "tvdbId": tvdb_id,
+        "qualityProfileId": 1,
+        "seasonFolder": true,
+        "monitored": true,
+        "seasons": []
+    });
+
+    let counter = Arc::new(AtomicU32::new(0));
+    Mock::given(method("POST"))
+        .and(path("/api/v3/series"))
+        .respond_with(OneCreatedThenConflictResponder {
+            counter: Arc::clone(&counter),
+            created_body: seeded.clone(),
+            conflict_body: SONARR_TITLE_SLUG_409_BODY,
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/series"))
+        .and(query_param("tvdbId", tvdb_id.to_string().as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([seeded])))
+        .mount(&server)
+        .await;
+
+    let client = SonarrClient::new(test_http(&server, RetryPolicy::no_retry()));
+    let req = add_series_request(tvdb_id);
+
+    let first = client.add_series(&req).await.unwrap();
+    assert!(matches!(first, AddOutcome::Created(ref s) if s.id == 21));
+
+    let second = client.add_series(&req).await.unwrap();
+    assert!(matches!(second, AddOutcome::AlreadyExisted(ref s) if s.id == 21));
+
+    let third = client.add_series(&req).await.unwrap();
+    assert!(matches!(third, AddOutcome::AlreadyExisted(ref s) if s.id == 21));
+}
+
+/// Concurrent regression test for the cross-instance 409 race.
+///
+/// Idempotent semantics demand: N concurrent `add_series` calls for
+/// the same series → exactly 1 Created + N-1 AlreadyExisted, 0 errors.
+/// Pre-fix, this asserted 1 ok / 3 err — the silent-data-loss bug.
+#[tokio::test]
+async fn concurrent_add_series_one_created_n_minus_1_already_existed() {
+    let server = MockServer::start().await;
+    let tvdb_id: u32 = 468_226;
+    let seeded = json!({
+        "id": 21,
+        "title": "Seeded Series",
+        "tvdbId": tvdb_id,
+        "qualityProfileId": 1,
+        "seasonFolder": true,
+        "monitored": true,
+        "seasons": []
+    });
+
+    let counter = Arc::new(AtomicU32::new(0));
+    Mock::given(method("POST"))
+        .and(path("/api/v3/series"))
+        .respond_with(OneCreatedThenConflictResponder {
+            counter: Arc::clone(&counter),
+            created_body: seeded.clone(),
+            conflict_body: SONARR_TITLE_SLUG_409_BODY,
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/series"))
+        .and(query_param("tvdbId", tvdb_id.to_string().as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([seeded])))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(SonarrClient::new(test_http(
+        &server,
+        RetryPolicy::no_retry(),
+    )));
+    let req = add_series_request(tvdb_id);
+
+    // 4 concurrent adds. Whichever Tokio task lands AtomicU32==0 is the
+    // Created winner; the other three race onto 409 and recover via
+    // get_series_by_tvdb_id → AlreadyExisted.
+    let (r1, r2, r3, r4) = tokio::join!(
+        {
+            let c = Arc::clone(&client);
+            let q = req.clone();
+            async move { c.add_series(&q).await }
+        },
+        {
+            let c = Arc::clone(&client);
+            let q = req.clone();
+            async move { c.add_series(&q).await }
+        },
+        {
+            let c = Arc::clone(&client);
+            let q = req.clone();
+            async move { c.add_series(&q).await }
+        },
+        {
+            let c = Arc::clone(&client);
+            let q = req.clone();
+            async move { c.add_series(&q).await }
+        },
+    );
+
+    let results = [r1, r2, r3, r4];
+    let mut created = 0u32;
+    let mut already = 0u32;
+    let mut errors = 0u32;
+    for r in &results {
+        match r {
+            Ok(AddOutcome::Created(_)) => created += 1,
+            Ok(AddOutcome::AlreadyExisted(_)) => already += 1,
+            Err(_) => errors += 1,
+        }
+    }
+    assert_eq!(created, 1, "exactly one caller wins the create");
+    assert_eq!(already, 3, "three losers absorb 409 as AlreadyExisted");
+    assert_eq!(errors, 0, "no caller surfaces an error to the handler");
+}
+
+#[tokio::test]
+async fn add_series_409_with_unrelated_constraint_propagates_error() {
+    let server = MockServer::start().await;
+    let tvdb_id: u32 = 999_999;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v3/series"))
+        .respond_with(ResponseTemplate::new(409).set_body_string(SONARR_TITLE_SLUG_409_BODY))
+        .mount(&server)
+        .await;
+    // GET-by-tvdbId returns empty → the 409 was for a *different*
+    // unique constraint (e.g. true title-slug collision between two
+    // genuinely different shows). Propagate as Conflict.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/series"))
+        .and(query_param("tvdbId", tvdb_id.to_string().as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+
+    let client = SonarrClient::new(test_http(&server, RetryPolicy::no_retry()));
+    let err = client
+        .add_series(&add_series_request(tvdb_id))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ArrError::Conflict { .. }),
+        "expected Conflict, got {err:?}"
+    );
+    assert!(!err.is_transient());
+}
+
+// ----- Radarr / add_movie (mirror set) -----
+
+#[tokio::test]
+async fn add_movie_first_call_returns_created_subsequent_409_become_already_existed() {
+    let server = MockServer::start().await;
+    let tmdb_id: u32 = 27_205;
+    let seeded = json!({
+        "id": 17,
+        "title": "Seeded Movie",
+        "year": 2010,
+        "tmdbId": tmdb_id,
+        "qualityProfileId": 1,
+        "hasFile": false
+    });
+
+    let counter = Arc::new(AtomicU32::new(0));
+    Mock::given(method("POST"))
+        .and(path("/api/v3/movie"))
+        .respond_with(OneCreatedThenConflictResponder {
+            counter: Arc::clone(&counter),
+            created_body: seeded.clone(),
+            conflict_body: RADARR_TMDB_409_BODY,
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/movie"))
+        .and(query_param("tmdbId", tmdb_id.to_string().as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([seeded])))
+        .mount(&server)
+        .await;
+
+    let client = RadarrClient::new(test_http(&server, RetryPolicy::no_retry()));
+    let req = add_movie_request(tmdb_id);
+
+    let first = client.add_movie(&req).await.unwrap();
+    assert!(matches!(first, AddOutcome::Created(ref m) if m.id == 17));
+
+    let second = client.add_movie(&req).await.unwrap();
+    assert!(matches!(second, AddOutcome::AlreadyExisted(ref m) if m.id == 17));
+
+    let third = client.add_movie(&req).await.unwrap();
+    assert!(matches!(third, AddOutcome::AlreadyExisted(ref m) if m.id == 17));
+}
+
+#[tokio::test]
+async fn concurrent_add_movie_one_created_n_minus_1_already_existed() {
+    let server = MockServer::start().await;
+    let tmdb_id: u32 = 27_205;
+    let seeded = json!({
+        "id": 17,
+        "title": "Seeded Movie",
+        "year": 2010,
+        "tmdbId": tmdb_id,
+        "qualityProfileId": 1,
+        "hasFile": false
+    });
+
+    let counter = Arc::new(AtomicU32::new(0));
+    Mock::given(method("POST"))
+        .and(path("/api/v3/movie"))
+        .respond_with(OneCreatedThenConflictResponder {
+            counter: Arc::clone(&counter),
+            created_body: seeded.clone(),
+            conflict_body: RADARR_TMDB_409_BODY,
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/movie"))
+        .and(query_param("tmdbId", tmdb_id.to_string().as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([seeded])))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(RadarrClient::new(test_http(
+        &server,
+        RetryPolicy::no_retry(),
+    )));
+    let req = add_movie_request(tmdb_id);
+
+    let (r1, r2, r3, r4) = tokio::join!(
+        {
+            let c = Arc::clone(&client);
+            let q = req.clone();
+            async move { c.add_movie(&q).await }
+        },
+        {
+            let c = Arc::clone(&client);
+            let q = req.clone();
+            async move { c.add_movie(&q).await }
+        },
+        {
+            let c = Arc::clone(&client);
+            let q = req.clone();
+            async move { c.add_movie(&q).await }
+        },
+        {
+            let c = Arc::clone(&client);
+            let q = req.clone();
+            async move { c.add_movie(&q).await }
+        },
+    );
+
+    let results = [r1, r2, r3, r4];
+    let mut created = 0u32;
+    let mut already = 0u32;
+    let mut errors = 0u32;
+    for r in &results {
+        match r {
+            Ok(AddOutcome::Created(_)) => created += 1,
+            Ok(AddOutcome::AlreadyExisted(_)) => already += 1,
+            Err(_) => errors += 1,
+        }
+    }
+    assert_eq!(created, 1);
+    assert_eq!(already, 3);
+    assert_eq!(errors, 0);
+}
+
+#[tokio::test]
+async fn add_movie_409_with_unrelated_constraint_propagates_error() {
+    let server = MockServer::start().await;
+    let tmdb_id: u32 = 999_999;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v3/movie"))
+        .respond_with(ResponseTemplate::new(409).set_body_string(RADARR_TMDB_409_BODY))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/movie"))
+        .and(query_param("tmdbId", tmdb_id.to_string().as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+
+    let client = RadarrClient::new(test_http(&server, RetryPolicy::no_retry()));
+    let err = client
+        .add_movie(&add_movie_request(tmdb_id))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ArrError::Conflict { .. }),
+        "expected Conflict, got {err:?}"
+    );
+    assert!(!err.is_transient());
 }
