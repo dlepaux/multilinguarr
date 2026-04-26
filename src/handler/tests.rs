@@ -1349,6 +1349,80 @@ async fn symlink_target_points_to_correct_storage() {
 }
 
 // =====================================================================
+// Language-tag fallback: INFO level + counter
+// =====================================================================
+
+#[tokio::test]
+async fn radarr_fallback_no_language_tags_increments_counter() {
+    let rig = Rig::new().await;
+    let folder = rig.primary_storage.join("Untagged (2024)");
+    write_movie_file(&folder, "??").await;
+
+    mount_radarr_lookup_empty(&rig.alt_server, "k2").await;
+    mount_radarr_quality_and_root(&rig.alt_server).await;
+    mount_radarr_add(&rig.alt_server).await;
+
+    let cfg = rig.config_radarr();
+    let primary = cfg.instances[0].clone();
+    let file_path = folder.join("movie.mkv");
+    let event = radarr_download_event(folder.to_str().unwrap(), file_path.to_str().unwrap());
+    let registry = Rig::registry(cfg, no_streams());
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // Hold the guard across all .awaits — single-thread executor keeps us
+    // on the same thread, so the TL recorder stays active throughout.
+    let recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    handle_radarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    drop(recorder_guard);
+    let render = handle.render();
+    assert!(
+        render.contains(
+            "multilinguarr_language_tag_fallback_total{instance=\"radarr-fr\",source=\"radarr\",fallback_language=\"fr\"} 1"
+        ),
+        "expected fallback counter with radarr labels in:\n{render}"
+    );
+}
+
+#[tokio::test]
+async fn sonarr_fallback_no_language_tags_increments_counter() {
+    let rig = Rig::new().await;
+    let series_dir = rig.primary_storage.join("Show");
+    write_episode_file(&series_dir, "??").await;
+
+    mount_sonarr_source_series(&rig.primary_server, "k1").await;
+    mount_sonarr_lookup_empty(&rig.alt_server, "k2").await;
+    mount_sonarr_quality_root_and_add(&rig.alt_server).await;
+
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    let episode_path = series_dir.join("Season 01/S01E01.mkv");
+    let event = sonarr_download_event(series_dir.to_str().unwrap(), episode_path.to_str().unwrap());
+    let registry = Rig::registry(cfg, no_streams());
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    handle_sonarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    drop(recorder_guard);
+    let render = handle.render();
+    assert!(
+        render.contains(
+            "multilinguarr_language_tag_fallback_total{instance=\"sonarr-fr\",source=\"sonarr\",fallback_language=\"fr\"} 1"
+        ),
+        "expected fallback counter with sonarr labels in:\n{render}"
+    );
+}
+
+// =====================================================================
 // HandlerError classification
 // =====================================================================
 

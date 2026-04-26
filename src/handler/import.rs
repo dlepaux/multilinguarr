@@ -32,6 +32,13 @@ fn strategy_label(strategy: LinkStrategy) -> &'static str {
     }
 }
 
+fn source_label(kind: InstanceKind) -> &'static str {
+    match kind {
+        InstanceKind::Radarr => "radarr",
+        InstanceKind::Sonarr => "sonarr",
+    }
+}
+
 // =====================================================================
 // Radarr
 // =====================================================================
@@ -86,11 +93,18 @@ pub async fn handle_radarr_download<P: FfprobeProber>(
         // instance's language (common for old rips, AVI, untagged MKV).
         // Treated as single-language so alternates get a propagate-add.
         if detection.languages.is_empty() {
-            warn!(
+            info!(
                 instance = %instance.name,
                 language = %instance.language,
                 "no language tags — assuming instance language"
             );
+            metrics::counter!(
+                crate::observability::names::LANGUAGE_TAG_FALLBACK,
+                "instance" => instance.name.clone(),
+                "source" => source_label(instance.kind),
+                "fallback_language" => instance.language.clone(),
+            )
+            .increment(1);
             detection.languages = [instance.language.clone()].into();
             detection.is_multi_audio = false;
         }
@@ -264,11 +278,18 @@ pub async fn handle_sonarr_download<P: FfprobeProber>(
         let mut detection = registry.detector.detect(file).await?;
 
         if detection.languages.is_empty() {
-            warn!(
+            info!(
                 instance = %instance.name,
                 language = %instance.language,
                 "no language tags — assuming instance language"
             );
+            metrics::counter!(
+                crate::observability::names::LANGUAGE_TAG_FALLBACK,
+                "instance" => instance.name.clone(),
+                "source" => source_label(instance.kind),
+                "fallback_language" => instance.language.clone(),
+            )
+            .increment(1);
             detection.languages = [instance.language.clone()].into();
             detection.is_multi_audio = false;
         }
