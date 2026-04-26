@@ -67,9 +67,18 @@ impl<P: FfprobeProber> LanguageDetector<P> {
     /// Returns [`DetectionError`] if ffprobe fails to spawn, times out, exits non-zero, or returns unparseable output.
     pub async fn detect(&self, file_path: &Path) -> Result<DetectionResult, DetectionError> {
         let start = std::time::Instant::now();
-        let streams = self.ffprobe.probe(file_path, self.ffprobe_timeout).await?;
-        metrics::histogram!(crate::observability::names::FFPROBE_DURATION)
-            .record(start.elapsed().as_secs_f64());
+        let result = self.ffprobe.probe(file_path, self.ffprobe_timeout).await;
+        let outcome = match &result {
+            Ok(_) => "success",
+            Err(DetectionError::FfprobeTimeout { .. }) => "timeout",
+            Err(_) => "error",
+        };
+        metrics::histogram!(
+            crate::observability::names::FFPROBE_DURATION,
+            "outcome" => outcome,
+        )
+        .record(start.elapsed().as_secs_f64());
+        let streams = result?;
         let languages = self.languages_from_streams(&streams);
         Ok(DetectionResult {
             is_multi_audio: languages.len() >= 2,

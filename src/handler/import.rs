@@ -20,10 +20,22 @@ use tracing::{info, info_span, warn};
 use super::cross_instance::{propagate_add_movie, propagate_add_series};
 use super::error::HandlerError;
 use super::registry::HandlerRegistry;
-use crate::config::{InstanceConfig, InstanceKind};
+use crate::config::{InstanceConfig, InstanceKind, LinkStrategy};
 use crate::detection::{DetectionResult, FfprobeProber};
 use crate::link::LinkManager;
 use crate::webhook::{RadarrDownload, SonarrDownload};
+
+/// Stable, lowercase label value for the `strategy` Prometheus label.
+///
+/// Replaces the previous `format!("{:?}", …)` which leaked Rust enum
+/// casing (`Symlink` / `Hardlink`) into the metrics surface. See
+/// `plan/research/v1-metrics-design.md` — the convention is lowercase.
+fn strategy_label(strategy: LinkStrategy) -> &'static str {
+    match strategy {
+        LinkStrategy::Symlink => "symlink",
+        LinkStrategy::Hardlink => "hardlink",
+    }
+}
 
 // =====================================================================
 // Radarr
@@ -171,7 +183,7 @@ async fn link_movie_with_log(
     if action == crate::link::LinkAction::Created {
         metrics::counter!(crate::observability::names::LINKS_CREATED,
             "instance" => target_name.to_owned(),
-            "strategy" => format!("{:?}", mgr.strategy()),
+            "strategy" => strategy_label(mgr.strategy()),
         )
         .increment(1);
     }
@@ -350,7 +362,7 @@ async fn link_episode_with_log(
     if action == crate::link::LinkAction::Created {
         metrics::counter!(crate::observability::names::LINKS_CREATED,
             "instance" => target_name.to_owned(),
-            "strategy" => format!("{:?}", mgr.strategy()),
+            "strategy" => strategy_label(mgr.strategy()),
         )
         .increment(1);
     }

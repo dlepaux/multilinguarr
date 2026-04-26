@@ -34,6 +34,7 @@ pub struct App {
     router: axum::Router,
     worker: tokio::task::JoinHandle<()>,
     sweeper: tokio::task::JoinHandle<()>,
+    dlq_tick: tokio::task::JoinHandle<()>,
 }
 
 impl std::fmt::Debug for App {
@@ -127,8 +128,11 @@ pub async fn build(bootstrap: Bootstrap) -> Result<App, Box<dyn std::error::Erro
         info!("no config found — setup required via /api/v1/setup/complete");
     }
 
-    // Prometheus metrics
+    // Prometheus metrics. Install must happen before any background
+    // task starts emitting, otherwise early ticks land on the no-op
+    // recorder and the first scrape is empty.
     let metrics_handle = observability::install();
+    let dlq_tick = observability::spawn_dlq_tick(db.pool().clone(), cancel.clone());
 
     // Combined router
     let router = build_router(
@@ -152,6 +156,7 @@ pub async fn build(bootstrap: Bootstrap) -> Result<App, Box<dyn std::error::Erro
         router,
         worker,
         sweeper,
+        dlq_tick,
     })
 }
 
@@ -232,7 +237,7 @@ pub async fn run(app: App) -> Result<(), std::io::Error> {
         .await;
 
     info!("HTTP server stopped — draining worker pool");
-    let _ = tokio::join!(app.worker, app.sweeper);
+    let _ = tokio::join!(app.worker, app.sweeper, app.dlq_tick);
     info!("worker pool drained");
 
     result
@@ -271,6 +276,7 @@ pub async fn build_test(config: Config) -> Result<App, Box<dyn std::error::Error
     }
 
     let metrics_handle = observability::install();
+    let dlq_tick = observability::spawn_dlq_tick(db.pool().clone(), cancel.clone());
 
     let repo = ConfigRepo::new(db.pool().clone());
     let webhook_state = webhook::AppState::new(config.clone(), store.clone());
@@ -299,5 +305,6 @@ pub async fn build_test(config: Config) -> Result<App, Box<dyn std::error::Error
         router,
         worker: tokio::spawn(async {}),
         sweeper: tokio::spawn(async {}),
+        dlq_tick,
     })
 }
