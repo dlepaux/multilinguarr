@@ -6,8 +6,6 @@
 //! [`JobProcessor`], and acks the result. Crashed workers are recovered
 //! by either [`spawn_sweeper`] or [`JobStore::reset_orphaned_claims`]
 //! at startup.
-//!
-//! See `plan/active/multilinguarr-rust-rewrite/06-queue-system.md`.
 
 mod error;
 mod job;

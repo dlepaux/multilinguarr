@@ -1,7 +1,4 @@
-//! Event handler orchestration — story 08a (import handlers + infrastructure).
-//!
-//! See `plan/active/multilinguarr-rust-rewrite/08a-event-handler-import.md`
-//! and `08b-delete-cross-instance-sync.md` for the full scope split.
+//! Event handler orchestration — import + delete + cross-instance sync.
 
 mod cross_instance;
 mod delete;

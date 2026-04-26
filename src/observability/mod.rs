@@ -3,9 +3,6 @@
 //! Uses the `metrics` facade crate. Counters and histograms are
 //! recorded inline where events happen (webhook, handler, detection,
 //! link). The exporter renders them on `GET /metrics`.
-//!
-//! See [plan/research/v1-metrics-design.md](../../../plan/research/v1-metrics-design.md)
-//! for the naming/label contract this module enforces.
 
 use std::time::Duration;
 

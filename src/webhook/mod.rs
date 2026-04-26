@@ -2,7 +2,6 @@
 //!
 //! Receives Radarr/Sonarr webhook POSTs, decodes them into typed
 //! events, and enqueues a job for the worker pool to handle later.
-//! See `plan/active/multilinguarr-rust-rewrite/07-webhook-server-event-routing.md`.
 
 mod error;
 mod events;
