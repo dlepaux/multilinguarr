@@ -466,3 +466,144 @@ async fn sonarr_episode_file_upgrade_alias_enqueues_as_download() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(store.stats().await.unwrap().pending, 1);
 }
+
+// ---------- unknown event surfacing ----------
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn sonarr_unknown_event_logs_raw_event_type() {
+    let (app, store) = fresh_app().await;
+    let body = json!({ "eventType": "TotallyMadeUpEvent", "noise": 1 });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhook/sonarr-fr")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(store.stats().await.unwrap().pending, 0);
+    assert!(
+        logs_contain("event_type=TotallyMadeUpEvent"),
+        "expected raw eventType in structured log"
+    );
+    assert!(
+        logs_contain("ignoring sonarr webhook"),
+        "expected the ignored-webhook log line"
+    );
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn radarr_unknown_event_logs_raw_event_type() {
+    let (app, store) = fresh_app().await;
+    let body = json!({ "eventType": "BrandNewArrEvent" });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhook/radarr-fr")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(store.stats().await.unwrap().pending, 0);
+    assert!(
+        logs_contain("event_type=BrandNewArrEvent"),
+        "expected raw eventType in structured log"
+    );
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn sonarr_missing_event_type_warns_with_truncated_body() {
+    let (app, store) = fresh_app().await;
+    // 300+ byte payload with no `eventType` field. Long enough to trip
+    // the 256-byte truncation cap.
+    let filler = "x".repeat(300);
+    let body = json!({ "filler": filler });
+    let body_str = body.to_string();
+    assert!(body_str.len() > 256);
+    let total_bytes = body_str.len();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhook/sonarr-fr")
+                .header("content-type", "application/json")
+                .body(Body::from(body_str))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 200 + WARN, not 400 — Sonarr retries on 4xx and would amplify a
+    // single bad payload into a tight loop.
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(store.stats().await.unwrap().pending, 0);
+    assert!(
+        logs_contain("undecodable sonarr webhook body"),
+        "expected the undecodable-body WARN line"
+    );
+    assert!(
+        logs_contain("event_type=<missing>"),
+        "expected <missing> sentinel for absent eventType"
+    );
+    assert!(
+        logs_contain(&format!("[truncated, {total_bytes} bytes total]")),
+        "expected truncation marker with byte count"
+    );
+}
+
+#[tokio::test]
+async fn unknown_event_counter_uses_bounded_label() {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+
+    let (app, _store) = fresh_app().await;
+    let body = json!({ "eventType": "WeirdNewEvent" });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhook/sonarr-fr")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let render = handle.render();
+    assert!(
+        render.contains("multilinguarr_webhook_unknown_event_total"),
+        "counter should be present in render:\n{render}"
+    );
+    assert!(
+        render.contains("event_type=\"unknown\""),
+        "event_type label must collapse to the bounded sentinel:\n{render}"
+    );
+    assert!(
+        render.contains("source=\"sonarr\""),
+        "source label should be set:\n{render}"
+    );
+    // The raw event name MUST NOT appear as a label — that would let a
+    // misconfigured arr or hostile payload explode Prometheus
+    // cardinality.
+    assert!(
+        !render.contains("WeirdNewEvent"),
+        "raw event name leaked into the metric — cardinality bound violated:\n{render}"
+    );
+}

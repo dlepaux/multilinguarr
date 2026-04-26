@@ -16,9 +16,6 @@ pub enum WebhookError {
     #[error("malformed json body: {0}")]
     MalformedJson(#[source] serde_json::Error),
 
-    #[error("payload did not match the expected event shape: {0}")]
-    Decode(#[source] serde_json::Error),
-
     #[error("failed to enqueue job: {0}")]
     Enqueue(#[source] QueueError),
 }
@@ -34,7 +31,6 @@ impl IntoResponse for WebhookError {
         let (status, code) = match &self {
             Self::UnknownInstance(_) => (StatusCode::NOT_FOUND, "unknown_instance"),
             Self::MalformedJson(_) => (StatusCode::BAD_REQUEST, "malformed_json"),
-            Self::Decode(_) => (StatusCode::BAD_REQUEST, "decode_error"),
             Self::Enqueue(_) => (StatusCode::INTERNAL_SERVER_ERROR, "enqueue_failed"),
         };
         let body = ErrorBody {

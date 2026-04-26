@@ -138,7 +138,19 @@ impl<P: FfprobeProber> HandlerRegistry<P> {
                 let instance = self.instance(&payload.instance)?.clone();
                 handle_radarr_download(&instance, &event, self).await
             }
-            RadarrEvent::Test(_) | RadarrEvent::Unknown => {
+            // Defensive arm: the HTTP layer filters these before enqueue,
+            // so they should never reach the worker. Listed exhaustively
+            // to keep the match total.
+            RadarrEvent::Test(_)
+            | RadarrEvent::Unknown
+            | RadarrEvent::Grab
+            | RadarrEvent::Rename
+            | RadarrEvent::MovieAdded
+            | RadarrEvent::MovieFileRenamed
+            | RadarrEvent::Health
+            | RadarrEvent::HealthRestored
+            | RadarrEvent::ApplicationUpdate
+            | RadarrEvent::ManualInteractionRequired => {
                 tracing::debug!(
                     instance = %payload.instance,
                     "ignoring radarr event in worker (handler-side)"
@@ -163,7 +175,15 @@ impl<P: FfprobeProber> HandlerRegistry<P> {
                 let instance = self.instance(&payload.instance)?.clone();
                 handle_sonarr_download(&instance, &event, self).await
             }
-            SonarrEvent::Test(_) | SonarrEvent::Unknown => {
+            SonarrEvent::Test(_)
+            | SonarrEvent::Unknown
+            | SonarrEvent::Grab
+            | SonarrEvent::Rename
+            | SonarrEvent::SeriesAdd
+            | SonarrEvent::Health
+            | SonarrEvent::HealthRestored
+            | SonarrEvent::ApplicationUpdate
+            | SonarrEvent::ManualInteractionRequired => {
                 tracing::debug!(
                     instance = %payload.instance,
                     "ignoring sonarr event in worker (handler-side)"

@@ -27,8 +27,21 @@ pub enum RadarrEvent {
     Download(RadarrDownload),
     MovieDelete(RadarrMovieDelete),
     MovieFileDelete(RadarrMovieFileDelete),
-    /// Catch-all for event types we do not handle (`Health`,
-    /// `ApplicationUpdate`, `Rename`, etc.). Logged and acked.
+    // Documented Radarr events we deliberately do not act on. Named so
+    // they deserialize cleanly and stay out of the `Unknown` bucket —
+    // the unknown-events counter is then a real signal of arr-version
+    // drift, not background noise.
+    Grab,
+    Rename,
+    MovieAdded,
+    MovieFileRenamed,
+    Health,
+    HealthRestored,
+    ApplicationUpdate,
+    ManualInteractionRequired,
+    /// Last-resort catch-all for event types not enumerated above.
+    /// Logged with the raw `eventType` and counted via
+    /// `multilinguarr_webhook_unknown_event_total`.
     #[serde(other)]
     Unknown,
 }
@@ -94,6 +107,14 @@ pub enum SonarrEvent {
     Download(SonarrDownload),
     SeriesDelete(SonarrSeriesDelete),
     EpisodeFileDelete(SonarrEpisodeFileDelete),
+    // See `RadarrEvent` — same rationale.
+    Grab,
+    Rename,
+    SeriesAdd,
+    Health,
+    HealthRestored,
+    ApplicationUpdate,
+    ManualInteractionRequired,
     #[serde(other)]
     Unknown,
 }

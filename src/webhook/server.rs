@@ -180,6 +180,11 @@ async fn webhook(
         WebhookError::MalformedJson(source)
     })?;
 
+    let raw_event_type = value
+        .get("eventType")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
     metrics::counter!(crate::observability::names::WEBHOOKS_RECEIVED,
         "instance" => instance_name.clone(),
         "kind" => match instance.kind {
@@ -190,28 +195,99 @@ async fn webhook(
     .increment(1);
 
     match instance.kind {
-        InstanceKind::Radarr => handle_radarr(&state, instance.name, value).await,
-        InstanceKind::Sonarr => handle_sonarr(&state, instance.name, value).await,
+        InstanceKind::Radarr => {
+            handle_radarr(&state, instance.name, value, raw_event_type, &body).await
+        }
+        InstanceKind::Sonarr => {
+            handle_sonarr(&state, instance.name, value, raw_event_type, &body).await
+        }
     }
+}
+
+/// Truncate `body` to the first 256 bytes on a UTF-8-safe boundary
+/// using `from_utf8_lossy` (replaces invalid sequences with `U+FFFD`)
+/// and append a `... [truncated, N bytes total]` marker if shortened.
+///
+/// Bounded log size (256 B is enough to identify the payload shape;
+/// arr bodies do not normally carry credentials but a misconfigured
+/// custom field could — keep the cap tight).
+fn truncated_body_preview(body: &[u8]) -> String {
+    use std::fmt::Write as _;
+    const MAX: usize = 256;
+    let total = body.len();
+    let head = body.get(..MAX).unwrap_or(body);
+    let mut preview = String::from_utf8_lossy(head).into_owned();
+    if total > MAX {
+        let _ = write!(preview, " ... [truncated, {total} bytes total]");
+    }
+    preview
+}
+
+/// Build the 200-OK ACK response for events that the webhook layer
+/// chooses not to enqueue (typed `Test`/no-op variants, decode failures,
+/// `Unknown`).
+fn ignored_ack(instance: String) -> Response {
+    (
+        StatusCode::OK,
+        Json(AckResponse {
+            instance,
+            status: "ignored",
+        }),
+    )
+        .into_response()
 }
 
 async fn handle_radarr(
     state: &AppState,
     instance: String,
     value: Value,
+    raw_event_type: Option<String>,
+    body: &[u8],
 ) -> Result<Response, WebhookError> {
-    let event: RadarrEvent = serde_json::from_value(value).map_err(WebhookError::Decode)?;
+    let event: RadarrEvent = match serde_json::from_value(value) {
+        Ok(e) => e,
+        Err(source) => {
+            // Sonarr/Radarr retry 4xx on the same payload — returning
+            // 400 here would amplify a single bad payload into a tight
+            // retry loop. Accept once, warn once, move on.
+            tracing::warn!(
+                %instance,
+                event_type = %raw_event_type.as_deref().unwrap_or("<missing>"),
+                body_preview = %truncated_body_preview(body),
+                error = %source,
+                "undecodable radarr webhook body — accepted to break arr retry loop"
+            );
+            return Ok(ignored_ack(instance));
+        }
+    };
 
-    if matches!(event, RadarrEvent::Unknown | RadarrEvent::Test(_)) {
-        tracing::info!(%instance, ?event, "ignoring radarr webhook");
-        return Ok((
-            StatusCode::OK,
-            Json(AckResponse {
-                instance,
-                status: "ignored",
-            }),
-        )
-            .into_response());
+    if matches!(
+        event,
+        RadarrEvent::Unknown
+            | RadarrEvent::Test(_)
+            | RadarrEvent::Grab
+            | RadarrEvent::Rename
+            | RadarrEvent::MovieAdded
+            | RadarrEvent::MovieFileRenamed
+            | RadarrEvent::Health
+            | RadarrEvent::HealthRestored
+            | RadarrEvent::ApplicationUpdate
+            | RadarrEvent::ManualInteractionRequired
+    ) {
+        let raw = raw_event_type.as_deref().unwrap_or("<missing>");
+        if matches!(event, RadarrEvent::Unknown) {
+            // Bounded label only — raw event name lives in the log line
+            // above to keep Prometheus cardinality flat.
+            metrics::counter!(
+                crate::observability::names::WEBHOOK_UNKNOWN_EVENT,
+                "instance" => instance.clone(),
+                "source" => "radarr",
+                "event_type" => "unknown",
+            )
+            .increment(1);
+        }
+        tracing::info!(%instance, event_type = %raw, "ignoring radarr webhook");
+        return Ok(ignored_ack(instance));
     }
 
     let payload = RadarrWebhookJob {
@@ -239,19 +315,47 @@ async fn handle_sonarr(
     state: &AppState,
     instance: String,
     value: Value,
+    raw_event_type: Option<String>,
+    body: &[u8],
 ) -> Result<Response, WebhookError> {
-    let event: SonarrEvent = serde_json::from_value(value).map_err(WebhookError::Decode)?;
+    let event: SonarrEvent = match serde_json::from_value(value) {
+        Ok(e) => e,
+        Err(source) => {
+            tracing::warn!(
+                %instance,
+                event_type = %raw_event_type.as_deref().unwrap_or("<missing>"),
+                body_preview = %truncated_body_preview(body),
+                error = %source,
+                "undecodable sonarr webhook body — accepted to break arr retry loop"
+            );
+            return Ok(ignored_ack(instance));
+        }
+    };
 
-    if matches!(event, SonarrEvent::Unknown | SonarrEvent::Test(_)) {
-        tracing::info!(%instance, ?event, "ignoring sonarr webhook");
-        return Ok((
-            StatusCode::OK,
-            Json(AckResponse {
-                instance,
-                status: "ignored",
-            }),
-        )
-            .into_response());
+    if matches!(
+        event,
+        SonarrEvent::Unknown
+            | SonarrEvent::Test(_)
+            | SonarrEvent::Grab
+            | SonarrEvent::Rename
+            | SonarrEvent::SeriesAdd
+            | SonarrEvent::Health
+            | SonarrEvent::HealthRestored
+            | SonarrEvent::ApplicationUpdate
+            | SonarrEvent::ManualInteractionRequired
+    ) {
+        let raw = raw_event_type.as_deref().unwrap_or("<missing>");
+        if matches!(event, SonarrEvent::Unknown) {
+            metrics::counter!(
+                crate::observability::names::WEBHOOK_UNKNOWN_EVENT,
+                "instance" => instance.clone(),
+                "source" => "sonarr",
+                "event_type" => "unknown",
+            )
+            .increment(1);
+        }
+        tracing::info!(%instance, event_type = %raw, "ignoring sonarr webhook");
+        return Ok(ignored_ack(instance));
     }
 
     let payload = SonarrWebhookJob {
