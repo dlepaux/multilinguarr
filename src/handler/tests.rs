@@ -1431,6 +1431,106 @@ async fn sonarr_fallback_no_language_tags_increments_counter() {
 }
 
 // =====================================================================
+// Audio-truth skip counter (observe-only: linking is unchanged)
+// =====================================================================
+
+#[tokio::test]
+async fn radarr_import_no_base_audio_track_increments_counter_observe_only() {
+    let rig = Rig::new().await;
+    let folder = rig.primary_storage.join("Liar 7.1 (2024)");
+    write_movie_file(&folder, "fr-71-only").await;
+
+    // single-language primary import still propagates the add to the alternate
+    mount_radarr_lookup_empty(&rig.alt_server, "k2").await;
+    mount_radarr_quality_and_root(&rig.alt_server).await;
+    mount_radarr_add(&rig.alt_server).await;
+
+    let cfg = rig.config_radarr();
+    let primary = cfg.instances[0].clone();
+    let file_path = folder.join("movie.mkv");
+    let event = radarr_download_event(folder.to_str().unwrap(), file_path.to_str().unwrap());
+    // fr main track but 7.1 (8ch) — no <=5.1 base in the instance language
+    let registry = Rig::registry(
+        cfg,
+        vec![AudioStream {
+            language: Some("fra".to_owned()),
+            channels: Some(8),
+            is_commentary: false,
+        }],
+    );
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    handle_radarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    drop(recorder_guard);
+    let render = handle.render();
+    assert!(
+        render.contains(
+            "multilinguarr_audio_skipped_total{instance=\"radarr-fr\",source=\"radarr\"} 1"
+        ),
+        "expected audio-skip counter with radarr labels in:\n{render}"
+    );
+    // observe-only: the file is still linked into the primary library
+    assert!(
+        fs::try_exists(rig.primary_library.join("Liar 7.1 (2024)/movie.mkv"))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn sonarr_import_no_base_audio_track_increments_counter_observe_only() {
+    let rig = Rig::new().await;
+    let series_dir = rig.primary_storage.join("Show 7.1");
+    write_episode_file(&series_dir, "fr-71-only").await;
+
+    mount_sonarr_source_series(&rig.primary_server, "k1").await;
+    mount_sonarr_lookup_empty(&rig.alt_server, "k2").await;
+    mount_sonarr_quality_root_and_add(&rig.alt_server).await;
+
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    let episode_path = series_dir.join("Season 01/S01E01.mkv");
+    let event = sonarr_download_event(series_dir.to_str().unwrap(), episode_path.to_str().unwrap());
+    let registry = Rig::registry(
+        cfg,
+        vec![AudioStream {
+            language: Some("fra".to_owned()),
+            channels: Some(8),
+            is_commentary: false,
+        }],
+    );
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    handle_sonarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    drop(recorder_guard);
+    let render = handle.render();
+    assert!(
+        render.contains(
+            "multilinguarr_audio_skipped_total{instance=\"sonarr-fr\",source=\"sonarr\"} 1"
+        ),
+        "expected audio-skip counter with sonarr labels in:\n{render}"
+    );
+    // observe-only: the episode is still linked into the primary library
+    assert!(
+        fs::try_exists(rig.primary_library.join("Show 7.1/Season 01/S01E01.mkv"))
+            .await
+            .unwrap()
+    );
+}
+
+// =====================================================================
 // Wrong-language skip counter
 // =====================================================================
 

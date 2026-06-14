@@ -50,6 +50,9 @@ pub mod names {
     pub const LANGUAGE_TAG_FALLBACK: &str = "multilinguarr_language_tag_fallback_total";
     /// Counter — files skipped because detected language ≠ expected (story 05).
     pub const WRONG_LANGUAGE_SKIP: &str = "multilinguarr_wrong_language_skip_total";
+    /// Counter — imports with no language-appropriate ≤5.1 base audio track
+    /// (title-liar candidate). Observe-only; auto-recovery wiring is later.
+    pub const AUDIO_SKIPPED: &str = "multilinguarr_audio_skipped_total";
 }
 
 /// DLQ gauge polling interval.
@@ -153,6 +156,10 @@ fn describe_all() {
     metrics::describe_counter!(
         names::WRONG_LANGUAGE_SKIP,
         "Imports skipped because the detected language did not include the expected one."
+    );
+    metrics::describe_counter!(
+        names::AUDIO_SKIPPED,
+        "Imports with no language-appropriate <=6ch non-commentary audio stream."
     );
 }
 

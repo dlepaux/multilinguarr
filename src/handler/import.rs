@@ -115,6 +115,26 @@ pub async fn handle_radarr_download<P: FfprobeProber>(
             "language detection complete",
         );
 
+        // Audio-truth gate (observe-only): flag imports whose audio has no
+        // language-appropriate <=5.1 base track. The counter is the alertable
+        // signal; linking is unchanged until enforcement lands (plan Phase 4).
+        if !registry
+            .detector
+            .has_base_audio_track(&detection.audio_streams, &instance.language)
+        {
+            metrics::counter!(
+                crate::observability::names::AUDIO_SKIPPED,
+                "instance" => instance.name.clone(),
+                "source" => source_label(instance.kind),
+            )
+            .increment(1);
+            warn!(
+                file = %file.display(),
+                instance = %instance.name,
+                "audio gate: no language-appropriate <=5.1 base track"
+            );
+        }
+
         let source_path = instance.storage_path.join(folder_name);
 
         if event.is_upgrade {
@@ -314,6 +334,26 @@ pub async fn handle_sonarr_download<P: FfprobeProber>(
             is_multi_audio = detection.is_multi_audio,
             "language detection complete",
         );
+
+        // Audio-truth gate (observe-only): flag imports whose audio has no
+        // language-appropriate <=5.1 base track. The counter is the alertable
+        // signal; linking is unchanged until enforcement lands (plan Phase 4).
+        if !registry
+            .detector
+            .has_base_audio_track(&detection.audio_streams, &instance.language)
+        {
+            metrics::counter!(
+                crate::observability::names::AUDIO_SKIPPED,
+                "instance" => instance.name.clone(),
+                "source" => source_label(instance.kind),
+            )
+            .increment(1);
+            warn!(
+                file = %file.display(),
+                instance = %instance.name,
+                "audio gate: no language-appropriate <=5.1 base track"
+            );
+        }
 
         let source_path = instance.storage_path.join(&relative_path);
 
