@@ -31,6 +31,9 @@ pub struct DetectionResult {
     pub languages: HashSet<String>,
     /// `true` when the file contains two or more configured languages.
     pub is_multi_audio: bool,
+    /// All audio streams ffprobe reported, retained so callers can apply
+    /// the language/role/channel base-track rule for a target language.
+    pub audio_streams: Vec<AudioStream>,
 }
 
 /// The detection engine. Cloneable — holds `Arc`s internally.
@@ -83,6 +86,7 @@ impl<P: FfprobeProber> LanguageDetector<P> {
         Ok(DetectionResult {
             is_multi_audio: languages.len() >= 2,
             languages,
+            audio_streams: streams,
         })
     }
 
@@ -92,24 +96,42 @@ impl<P: FfprobeProber> LanguageDetector<P> {
             let Some(code) = stream.language.as_deref() else {
                 continue;
             };
-            let code_lower = code.to_ascii_lowercase();
-            if code_lower == "und" {
+            if code.eq_ignore_ascii_case("und") {
                 continue;
             }
-            for (key, def) in &self.languages.definitions {
-                let one = def
-                    .iso_639_1
-                    .iter()
-                    .any(|c| c.eq_ignore_ascii_case(&code_lower));
-                let two = def
-                    .iso_639_2
-                    .iter()
-                    .any(|c| c.eq_ignore_ascii_case(&code_lower));
-                if one || two {
+            for key in self.languages.definitions.keys() {
+                if self.code_matches_key(code, key) {
                     out.insert(key.clone());
                 }
             }
         }
         out
+    }
+
+    /// True if an ISO 639-1/2 `code` maps to the configured language `key`.
+    fn code_matches_key(&self, code: &str, key: &str) -> bool {
+        self.languages.definitions.get(key).is_some_and(|def| {
+            def.iso_639_1.iter().any(|c| c.eq_ignore_ascii_case(code))
+                || def.iso_639_2.iter().any(|c| c.eq_ignore_ascii_case(code))
+        })
+    }
+
+    /// True if any audio stream is a usable base track for `target`: a
+    /// non-commentary stream in the target language — or untagged / `und`,
+    /// treated as the instance language to mirror the import fallback —
+    /// with a 5.1-or-lower (`<= 6`) channel layout. Unknown channel count
+    /// fails open (counts as a base track) so a release is never rejected
+    /// on missing ffprobe data.
+    #[must_use]
+    pub fn has_base_audio_track(&self, streams: &[AudioStream], target: &str) -> bool {
+        streams.iter().any(|s| {
+            let lang_ok = match s.language.as_deref() {
+                None => true,
+                Some(code) => {
+                    code.eq_ignore_ascii_case("und") || self.code_matches_key(code, target)
+                }
+            };
+            lang_ok && !s.is_commentary && s.channels.is_none_or(|c| c <= 6)
+        })
     }
 }

@@ -185,6 +185,69 @@ async fn three_languages_detected() {
     assert!(result.is_multi_audio);
 }
 
+// ---------- has_base_audio_track (language + role + channel rule) ----------
+
+#[tokio::test]
+async fn base_track_rule_is_language_role_and_channel_aware() {
+    // en target: 7.1 eng main + 2ch eng commentary + 6ch fre -> FAIL
+    // (only eng non-commentary stream is 8ch; the 6ch one is the wrong language)
+    let det = detector(StubFfprobe::new(Ok(vec![
+        AudioStream {
+            language: Some("eng".to_owned()),
+            channels: Some(8),
+            is_commentary: false,
+        },
+        AudioStream {
+            language: Some("eng".to_owned()),
+            channels: Some(2),
+            is_commentary: true,
+        },
+        AudioStream {
+            language: Some("fre".to_owned()),
+            channels: Some(6),
+            is_commentary: false,
+        },
+    ])));
+    let r = det.detect(Path::new("/x.mkv")).await.unwrap();
+    assert!(!det.has_base_audio_track(&r.audio_streams, "en"));
+
+    // en target: a 6ch eng non-commentary stream present -> PASS
+    let det = detector(StubFfprobe::new(Ok(vec![AudioStream {
+        language: Some("eng".to_owned()),
+        channels: Some(6),
+        is_commentary: false,
+    }])));
+    let r = det.detect(Path::new("/x.mkv")).await.unwrap();
+    assert!(det.has_base_audio_track(&r.audio_streams, "en"));
+
+    // fre-only 6ch, en target -> FAIL (wrong-language base track)
+    let det = detector(StubFfprobe::new(Ok(vec![AudioStream {
+        language: Some("fre".to_owned()),
+        channels: Some(6),
+        is_commentary: false,
+    }])));
+    let r = det.detect(Path::new("/x.mkv")).await.unwrap();
+    assert!(!det.has_base_audio_track(&r.audio_streams, "en"));
+
+    // untagged + unknown channels -> fail-open PASS (never false-reject on missing data)
+    let det = detector(StubFfprobe::new(Ok(vec![AudioStream {
+        language: None,
+        channels: None,
+        is_commentary: false,
+    }])));
+    let r = det.detect(Path::new("/x.mkv")).await.unwrap();
+    assert!(det.has_base_audio_track(&r.audio_streams, "en"));
+
+    // und main track, 6ch -> PASS (undetermined treated as instance language)
+    let det = detector(StubFfprobe::new(Ok(vec![AudioStream {
+        language: Some("und".to_owned()),
+        channels: Some(6),
+        is_commentary: false,
+    }])));
+    let r = det.detect(Path::new("/x.mkv")).await.unwrap();
+    assert!(det.has_base_audio_track(&r.audio_streams, "en"));
+}
+
 // ---------- parse_streams_json ----------
 
 #[test]

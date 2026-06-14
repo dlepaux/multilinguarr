@@ -674,6 +674,7 @@ mod tests {
         let detection = DetectionResult {
             languages: HashSet::from(["fr".to_owned(), "en".to_owned()]),
             is_multi_audio: true,
+            audio_streams: vec![],
         };
 
         let all = vec![inst_fr.clone(), inst_en.clone(), inst_sonarr];
@@ -698,6 +699,7 @@ mod tests {
         let detection = DetectionResult {
             languages: HashSet::from(["fr".to_owned()]),
             is_multi_audio: false,
+            audio_streams: vec![],
         };
 
         let all = vec![inst_fr.clone(), inst_en];
