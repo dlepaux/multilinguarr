@@ -1,3 +1,13 @@
+# [1.2.0](https://github.com/dlepaux/multilinguarr/compare/v1.1.0...v1.2.0) (2026-06-14)
+
+
+### Features
+
+* **detection:** language+role-aware has_base_audio_track ([1c54f9e](https://github.com/dlepaux/multilinguarr/commit/1c54f9ea8c669b3f481a71389868e2aa0eac0928))
+* **detection:** parse audio channel count + commentary disposition ([7ab092d](https://github.com/dlepaux/multilinguarr/commit/7ab092d32e3cb0615f9c86fe826a83abd604f20c))
+* **handler:** observe-only audio-truth skip counter on import ([5ba1f32](https://github.com/dlepaux/multilinguarr/commit/5ba1f32026f73ca9387360e9d2d6b5c182aa9b93))
+* **reconcile:** emit audio-truth skip counter on reconcile path ([8756571](https://github.com/dlepaux/multilinguarr/commit/87565714483368c643127cdb49937560ed2779c1))
+
 # [1.1.0](https://github.com/dlepaux/multilinguarr/compare/v1.0.0...v1.1.0) (2026-04-26)
 
 
