@@ -458,9 +458,13 @@ mod tests {
         vec![
             AudioStream {
                 language: Some("eng".to_owned()),
+                channels: None,
+                is_commentary: false,
             },
             AudioStream {
                 language: Some("fre".to_owned()),
+                channels: None,
+                is_commentary: false,
             },
         ]
     }
@@ -468,6 +472,8 @@ mod tests {
     fn fr_only_streams() -> Vec<AudioStream> {
         vec![AudioStream {
             language: Some("fre".to_owned()),
+            channels: None,
+            is_commentary: false,
         }]
     }
 

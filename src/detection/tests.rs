@@ -81,6 +81,8 @@ fn detector(stub: StubFfprobe) -> LanguageDetector<StubFfprobe> {
 async fn single_language_detected() {
     let det = detector(StubFfprobe::new(Ok(vec![AudioStream {
         language: Some("fra".to_owned()),
+        channels: None,
+        is_commentary: false,
     }])));
     let result = det.detect(Path::new("/fake/video.mkv")).await.unwrap();
     assert!(result.languages.contains("fr"));
@@ -93,9 +95,13 @@ async fn multi_audio_detected() {
     let det = detector(StubFfprobe::new(Ok(vec![
         AudioStream {
             language: Some("eng".to_owned()),
+            channels: None,
+            is_commentary: false,
         },
         AudioStream {
             language: Some("fra".to_owned()),
+            channels: None,
+            is_commentary: false,
         },
     ])));
     let result = det.detect(Path::new("/fake/video.mkv")).await.unwrap();
@@ -109,9 +115,13 @@ async fn und_streams_dropped() {
     let det = detector(StubFfprobe::new(Ok(vec![
         AudioStream {
             language: Some("und".to_owned()),
+            channels: None,
+            is_commentary: false,
         },
         AudioStream {
             language: Some("eng".to_owned()),
+            channels: None,
+            is_commentary: false,
         },
     ])));
     let result = det.detect(&PathBuf::from("/x.mkv")).await.unwrap();
@@ -122,7 +132,11 @@ async fn und_streams_dropped() {
 
 #[tokio::test]
 async fn no_language_tags_yields_empty() {
-    let det = detector(StubFfprobe::new(Ok(vec![AudioStream { language: None }])));
+    let det = detector(StubFfprobe::new(Ok(vec![AudioStream {
+        language: None,
+        channels: None,
+        is_commentary: false,
+    }])));
     let result = det.detect(Path::new("/fake/video.mkv")).await.unwrap();
     assert!(result.languages.is_empty());
     assert!(!result.is_multi_audio);
@@ -139,6 +153,8 @@ async fn ffprobe_error_propagates() {
 async fn iso_639_1_codes_matched() {
     let det = detector(StubFfprobe::new(Ok(vec![AudioStream {
         language: Some("fr".to_owned()),
+        channels: None,
+        is_commentary: false,
     }])));
     let result = det.detect(Path::new("/fake/video.mkv")).await.unwrap();
     assert!(result.languages.contains("fr"));
@@ -149,12 +165,18 @@ async fn three_languages_detected() {
     let det = detector(StubFfprobe::new(Ok(vec![
         AudioStream {
             language: Some("eng".to_owned()),
+            channels: None,
+            is_commentary: false,
         },
         AudioStream {
             language: Some("fra".to_owned()),
+            channels: None,
+            is_commentary: false,
         },
         AudioStream {
             language: Some("spa".to_owned()),
+            channels: None,
+            is_commentary: false,
         },
     ])));
     let result = det.detect(Path::new("/fake/video.mkv")).await.unwrap();
@@ -202,4 +224,35 @@ fn parse_streams_missing_tags_yields_none_language() {
 #[test]
 fn parse_streams_invalid_json_errors() {
     assert!(parse_streams_json("not json").is_err());
+}
+
+#[test]
+fn parse_streams_captures_channels_and_disposition_commentary() {
+    let json = r#"{
+        "streams": [
+            { "channels": 8, "disposition": { "comment": 0, "visual_impaired": 0 }, "tags": { "language": "eng" } },
+            { "channels": 2, "disposition": { "comment": 1, "visual_impaired": 0 }, "tags": { "language": "eng", "title": "Director's Track" } },
+            { "channels": 6, "tags": { "language": "fre" } }
+        ]
+    }"#;
+    let out = parse_streams_json(json).unwrap();
+    assert_eq!(out[0].channels, Some(8));
+    assert!(!out[0].is_commentary);
+    assert_eq!(out[1].channels, Some(2));
+    assert!(out[1].is_commentary); // disposition.comment == 1
+    assert_eq!(out[2].channels, Some(6));
+    assert!(!out[2].is_commentary); // missing disposition tolerated
+}
+
+#[test]
+fn parse_streams_commentary_detected_by_title() {
+    let json = r#"{"streams":[
+        { "channels": 2, "tags": { "language": "eng", "title": "Audio Commentary" } },
+        { "channels": 2, "tags": { "language": "eng", "title": "Visually Impaired" } },
+        { "channels": 2, "tags": { "language": "eng", "title": "Stereo" } }
+    ]}"#;
+    let out = parse_streams_json(json).unwrap();
+    assert!(out[0].is_commentary); // "commentary" in title
+    assert!(out[1].is_commentary); // "visually impaired" in title
+    assert!(!out[2].is_commentary);
 }

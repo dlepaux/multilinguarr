@@ -15,12 +15,18 @@ use super::error::DetectionError;
 
 /// One audio stream as returned by `ffprobe`.
 ///
-/// Only the `tags.language` field is load-bearing — everything else is
-/// ignored. ffprobe emits ISO 639-2 codes (three letters) for audio
-/// tracks, so that is what callers will usually match against.
+/// `tags.language` (ISO 639-2, three letters) drives language matching.
+/// `channels` and `is_commentary` back the audio-quality gate: a release
+/// passes only if a language-appropriate, non-commentary stream has a
+/// `<= 6`-channel (5.1-or-lower) layout.
 #[derive(Debug, Clone)]
 pub struct AudioStream {
     pub language: Option<String>,
+    pub channels: Option<u8>,
+    /// True when disposition marks this a commentary / visual-impaired
+    /// track, or its title names it as one. Such tracks are not the
+    /// feature's base audio.
+    pub is_commentary: bool,
 }
 
 /// Abstraction over "run ffprobe and give me the audio streams". The
@@ -130,10 +136,33 @@ pub fn parse_streams_json(json: &str) -> Result<Vec<AudioStream>, serde_json::Er
     Ok(envelope
         .streams
         .into_iter()
-        .map(|s| AudioStream {
-            language: s.tags.and_then(|t| t.language),
+        .map(|s| {
+            let is_commentary = s
+                .disposition
+                .as_ref()
+                .is_some_and(|d| d.comment == Some(1) || d.visual_impaired == Some(1))
+                || s.tags
+                    .as_ref()
+                    .and_then(|t| t.title.as_deref())
+                    .is_some_and(title_is_commentary);
+            AudioStream {
+                language: s.tags.and_then(|t| t.language),
+                channels: s.channels,
+                is_commentary,
+            }
         })
         .collect())
+}
+
+/// Heuristic: does a stream's title name it a commentary / descriptive
+/// track? A small substring check on purpose — not worth a `regex` dep.
+fn title_is_commentary(title: &str) -> bool {
+    let t = title.to_lowercase();
+    t.contains("comment")
+        || t.contains("narrat")
+        || t.contains("descri")
+        || t.contains("visual impair")
+        || t.contains("visually impair")
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,13 +174,29 @@ struct FfprobeEnvelope {
 #[derive(Debug, Deserialize)]
 struct FfprobeStream {
     #[serde(default)]
+    channels: Option<u8>,
+    #[serde(default)]
+    disposition: Option<FfprobeDisposition>,
+    #[serde(default)]
     tags: Option<FfprobeTags>,
+}
+
+/// Subset of ffprobe's `disposition` object — the flags that mark a track
+/// as non-feature audio. Unknown disposition fields are ignored by serde.
+#[derive(Debug, Deserialize)]
+struct FfprobeDisposition {
+    #[serde(default)]
+    comment: Option<u8>,
+    #[serde(default)]
+    visual_impaired: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
 struct FfprobeTags {
     #[serde(default)]
     language: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 /// Minimal `which` replacement — a 15-line PATH scan, no `which` crate.

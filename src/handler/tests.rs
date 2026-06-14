@@ -188,9 +188,13 @@ fn multi_audio_streams() -> Vec<AudioStream> {
     vec![
         AudioStream {
             language: Some("eng".to_owned()),
+            channels: None,
+            is_commentary: false,
         },
         AudioStream {
             language: Some("fra".to_owned()),
+            channels: None,
+            is_commentary: false,
         },
     ]
 }
@@ -198,12 +202,16 @@ fn multi_audio_streams() -> Vec<AudioStream> {
 fn fr_only_streams() -> Vec<AudioStream> {
     vec![AudioStream {
         language: Some("fra".to_owned()),
+        channels: None,
+        is_commentary: false,
     }]
 }
 
 fn en_only_streams() -> Vec<AudioStream> {
     vec![AudioStream {
         language: Some("eng".to_owned()),
+        channels: None,
+        is_commentary: false,
     }]
 }
 
