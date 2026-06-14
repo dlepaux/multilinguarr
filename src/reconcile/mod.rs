@@ -143,6 +143,25 @@ async fn regenerate_movies<P: FfprobeProber>(
             continue;
         }
 
+        // Audio-truth gate (observe-only): inventory existing on-disk files
+        // with no language-appropriate <=5.1 base track. Linking is unchanged.
+        if !ctx
+            .detector
+            .has_base_audio_track(&detection.audio_streams, &instance.language)
+        {
+            metrics::counter!(
+                crate::observability::names::AUDIO_SKIPPED,
+                "instance" => instance.name.clone(),
+                "source" => "radarr",
+            )
+            .increment(1);
+            tracing::warn!(
+                file = %file_path.display(),
+                instance = %instance.name,
+                "audio gate: no language-appropriate <=5.1 base track"
+            );
+        }
+
         let source_path = instance.storage_path.join(&folder_name);
         let targets = resolve_targets(instance, ctx.all_instances, &detection);
 
@@ -254,6 +273,25 @@ async fn walk_season_files<P: FfprobeProber>(
         if detection.languages.is_empty() {
             result.skipped += 1;
             continue;
+        }
+
+        // Audio-truth gate (observe-only): inventory existing on-disk files
+        // with no language-appropriate <=5.1 base track. Linking is unchanged.
+        if !ctx
+            .detector
+            .has_base_audio_track(&detection.audio_streams, &instance.language)
+        {
+            metrics::counter!(
+                crate::observability::names::AUDIO_SKIPPED,
+                "instance" => instance.name.clone(),
+                "source" => "sonarr",
+            )
+            .increment(1);
+            tracing::warn!(
+                file = %file_path.display(),
+                instance = %instance.name,
+                "audio gate: no language-appropriate <=5.1 base track"
+            );
         }
 
         let file_name = file_path
@@ -573,6 +611,57 @@ mod tests {
         assert!(fs::try_exists(&link).await.unwrap());
         let target = fs::read_link(&link).await.unwrap();
         assert!(target.starts_with(&storage));
+    }
+
+    #[tokio::test]
+    async fn regenerate_no_base_audio_track_increments_counter_observe_only() {
+        let tmp = TempDir::new().unwrap();
+        let storage = tmp.path().join("storage-fr");
+        let library = tmp.path().join("library-fr");
+        fs::create_dir_all(&storage).await.unwrap();
+        fs::create_dir_all(&library).await.unwrap();
+
+        let movie_dir = storage.join("Liar 7.1 (2024)");
+        fs::create_dir_all(&movie_dir).await.unwrap();
+        fs::write(movie_dir.join("movie.mkv"), "content")
+            .await
+            .unwrap();
+
+        let inst = make_instance("radarr-fr", InstanceKind::Radarr, "fr", &storage, &library);
+        let mgr = LinkManager::from_instance(&inst);
+        // fr main track but 7.1 (8ch) — no <=5.1 base in the instance language
+        let streams = vec![AudioStream {
+            language: Some("fre".to_owned()),
+            channels: Some(8),
+            is_commentary: false,
+        }];
+        let detector = LanguageDetector::new(en_fr_config(), StubFfprobe(streams));
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+        let result = regenerate_all(
+            &[inst.clone()],
+            &detector,
+            &[(inst.name.clone(), mgr)],
+            false,
+        )
+        .await;
+
+        drop(recorder_guard);
+        let render = handle.render();
+        assert!(
+            render.contains(
+                "multilinguarr_audio_skipped_total{instance=\"radarr-fr\",source=\"radarr\"} 1"
+            ),
+            "expected audio-skip counter in:\n{render}"
+        );
+        // observe-only: the link is still created
+        assert_eq!(result.linked, 1);
+        assert!(fs::try_exists(library.join("Liar 7.1 (2024)"))
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
