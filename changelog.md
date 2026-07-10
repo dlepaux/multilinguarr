@@ -1,3 +1,10 @@
+## [1.2.2](https://github.com/dlepaux/multilinguarr/compare/v1.2.1...v1.2.2) (2026-07-10)
+
+
+### Bug Fixes
+
+* **reconcile:** apply the episode keep-policy in the regenerate walk ([c4d4395](https://github.com/dlepaux/multilinguarr/commit/c4d4395d3ba584b718907cec74ce464d305fd306))
+
 ## [1.2.1](https://github.com/dlepaux/multilinguarr/compare/v1.2.0...v1.2.1) (2026-07-10)
 
 
