@@ -1,3 +1,11 @@
+## [1.2.1](https://github.com/dlepaux/multilinguarr/compare/v1.2.0...v1.2.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **link:** decide link targets by language, dedupe episodes per library ([c385413](https://github.com/dlepaux/multilinguarr/commit/c3854139d3c8d05d24d90476ad6c0092d4470f9d))
+* **link:** let an instance replace its own episode link on upgrade ([e4c85fc](https://github.com/dlepaux/multilinguarr/commit/e4c85fc141d9c1be455907579b1a83b6e7ef9a27))
+
 # [1.2.0](https://github.com/dlepaux/multilinguarr/compare/v1.1.0...v1.2.0) (2026-06-14)
 
 
