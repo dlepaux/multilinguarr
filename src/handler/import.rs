@@ -477,11 +477,14 @@ async fn link_sonarr_primary<P: FfprobeProber>(
 /// Two releases of the same episode (a French `MULTi` and a native English
 /// grab) both legitimately carry English audio, so both are eligible for the
 /// English library. Jellyfin has no way to stack them — release filenames
-/// never match its version convention — so it renders two episodes. The
-/// keep-policy resolves the tie: the release whose *source instance* speaks
-/// the library's language wins, because that is the native-audio copy.
-/// Ties and unidentifiable owners keep the incumbent, so the outcome does not
-/// depend on import order.
+/// never match its version convention — so it renders two episodes.
+///
+/// The keep-policy, in order:
+/// 1. An instance always replaces its **own** link (upgrade / re-import).
+/// 2. Otherwise the release whose *source instance* speaks the library's
+///    language wins — that is the native-audio copy.
+/// 3. Ties and unidentifiable owners keep the incumbent, so the surviving
+///    link does not depend on import order.
 async fn link_episode_deduped<P: FfprobeProber>(
     registry: &HandlerRegistry<P>,
     source_instance: &InstanceConfig,
@@ -497,12 +500,18 @@ async fn link_episode_deduped<P: FfprobeProber>(
             .find_conflicting_episode_link(relative_path, season, number)
             .await?
         {
-            let incumbent_is_native = owner_language(registry, &existing)
-                .await
-                .is_some_and(|lang| lang == target.language);
+            let incumbent = owner_instance(registry, &existing).await;
+
+            // An instance always replaces its OWN link for an episode: this is
+            // an upgrade or re-import, not a cross-instance duplicate. The old
+            // link carries the previous release's filename, so the upgrade
+            // unlink (which matches on the new name) cannot have removed it.
+            let incumbent_is_self = incumbent.is_some_and(|i| i.name == source_instance.name);
+
+            let incumbent_is_native = incumbent.is_some_and(|i| i.language == target.language);
             let challenger_is_native = source_instance.language == target.language;
 
-            if incumbent_is_native || !challenger_is_native {
+            if !incumbent_is_self && (incumbent_is_native || !challenger_is_native) {
                 metrics::counter!(
                     crate::observability::names::DUPLICATE_LINK_SKIPPED,
                     "instance" => target.name.clone(),
@@ -535,18 +544,17 @@ async fn link_episode_deduped<P: FfprobeProber>(
     link_episode_with_log(mgr, source_path, relative_path, &target.name).await
 }
 
-/// Language of the instance whose storage backs `link`, or `None` when the
-/// link cannot be resolved (hardlink strategy, or a foreign target).
-async fn owner_language<P: FfprobeProber>(
-    registry: &HandlerRegistry<P>,
+/// The instance whose storage backs `link`, or `None` when the link cannot be
+/// resolved (hardlink strategy, or a target outside every configured storage).
+async fn owner_instance<'a, P: FfprobeProber>(
+    registry: &'a HandlerRegistry<P>,
     link: &Path,
-) -> Option<String> {
+) -> Option<&'a InstanceConfig> {
     let target = tokio::fs::read_link(link).await.ok()?;
     registry
         .config_instances()
         .iter()
         .find(|i| target.starts_with(&i.storage_path))
-        .map(|i| i.language.clone())
 }
 
 async fn link_sonarr_alternate<P: FfprobeProber>(

@@ -255,10 +255,16 @@ pub async fn series_02_single_en_alternate_links_alt_only() {
 }
 
 // =====================================================================
-// 03 — single-EN episode on primary FR (cross-instance add)
+// 03 — single-EN episode on primary FR: serves both libraries, no add
+//
+// The file carries English, so the English library is served by this very
+// copy. Asking Sonarr-EN to fetch the episode as well would download a
+// second copy of media we already hold — the defect this scenario guards.
+// The primary's own library still gets the link (the operator asked for the
+// episode there; think a VOSTFR grab: English audio, French subtitles).
 // =====================================================================
 
-pub async fn series_03_single_en_on_primary_fr_propagates_add() {
+pub async fn series_03_single_en_on_primary_fr_links_both_without_add() {
     let h = harness().await;
     cleanup_all(&h, lookup_tvdb_id(&h).await).await;
 
@@ -272,14 +278,23 @@ pub async fn series_03_single_en_on_primary_fr_propagates_add() {
 
     ship_webhook(&h, "sonarr-fr", episode_download_payload(&handle, false)).await;
 
-    // Cross-instance propagation: Sonarr-EN now has the series.
+    // One storage copy, both libraries.
+    let rel_in_lib: PathBuf = [&handle.folder_name, RELATIVE_EPISODE].iter().collect();
+    assertions::assert_present(&h.sandbox.library.tv_fr.join(&rel_in_lib))
+        .await
+        .expect("tv fr present — requested here");
+    assertions::assert_present(&h.sandbox.library.tv_en.join(&rel_in_lib))
+        .await
+        .expect("tv en present — file carries english");
+
+    // No cross-instance add: English is already satisfied by this file.
     assert!(
         h.sonarr_en_client
             .find_series_by_tvdb(handle.tvdb_id)
             .await
             .expect("alt lookup")
-            .is_some(),
-        "Sonarr-EN should receive the cross-instance add"
+            .is_none(),
+        "Sonarr-EN must not be asked to re-download an episode we already hold in English"
     );
 
     cleanup_all(&h, handle.tvdb_id).await;

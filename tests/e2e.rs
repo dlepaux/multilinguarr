@@ -49,7 +49,7 @@ async fn e2e_all_scenarios() {
     // Series
     series::series_01_multi_audio_primary_links_both_libraries().await;
     series::series_02_single_en_alternate_links_alt_only().await;
-    series::series_03_single_en_on_primary_fr_propagates_add().await;
+    series::series_03_single_en_on_primary_fr_links_both_without_add().await;
     series::series_04_upgrade_to_multi_audio_relinks_both_libraries().await;
     series::series_05_delete_from_primary_clears_both_libraries().await;
     series::series_06_full_journey_import_then_delete().await;

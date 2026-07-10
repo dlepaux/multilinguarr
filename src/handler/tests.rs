@@ -1847,3 +1847,63 @@ async fn sonarr_non_native_release_does_not_displace_incumbent_native_link() {
     .await
     .unwrap());
 }
+
+#[tokio::test]
+async fn sonarr_upgrade_replaces_this_instances_own_link_even_when_renamed() {
+    let rig = Rig::new().await;
+
+    // Alternate imports an English release.
+    let alt_series = rig.alt_storage.join("Show");
+    let old = write_named_episode(&alt_series, "S01E01.OLD-GRP.mkv", "old").await;
+    let old_event = sonarr_download_event_named(
+        alt_series.to_str().unwrap(),
+        old.to_str().unwrap(),
+        "Season 01/S01E01.OLD-GRP.mkv",
+    );
+    let cfg = rig.config_sonarr();
+    let alternate = cfg.instances[1].clone();
+    handle_sonarr_download(
+        &alternate,
+        &old_event,
+        &Rig::registry(cfg, en_only_streams()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        fs::try_exists(rig.alt_library.join("Show/Season 01/S01E01.OLD-GRP.mkv"))
+            .await
+            .unwrap()
+    );
+
+    // Same instance re-imports the same episode under a DIFFERENT release
+    // name. The upgrade unlink matches on the new name, so the old link is
+    // still there — the instance must replace its own link, not skip.
+    let new = write_named_episode(&alt_series, "S01E01.NEW-GRP.mkv", "new").await;
+    let new_event = sonarr_download_event_named(
+        alt_series.to_str().unwrap(),
+        new.to_str().unwrap(),
+        "Season 01/S01E01.NEW-GRP.mkv",
+    );
+    let cfg = rig.config_sonarr();
+    let alternate = cfg.instances[1].clone();
+    handle_sonarr_download(
+        &alternate,
+        &new_event,
+        &Rig::registry(cfg, en_only_streams()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(rig.alt_library.join("Show/Season 01/S01E01.NEW-GRP.mkv"))
+            .await
+            .unwrap(),
+        "new"
+    );
+    assert!(
+        !fs::try_exists(rig.alt_library.join("Show/Season 01/S01E01.OLD-GRP.mkv"))
+            .await
+            .unwrap(),
+        "an instance must replace its own stale link, not leave a duplicate"
+    );
+}
