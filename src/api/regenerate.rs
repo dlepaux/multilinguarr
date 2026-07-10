@@ -54,7 +54,13 @@ pub async fn trigger(
         .map(|i| (i.name.clone(), LinkManager::from_instance(i)))
         .collect();
 
-    let result =
-        reconcile::regenerate_all(instances, detector, &link_managers, query.dry_run).await;
+    let result = reconcile::regenerate_all(
+        instances,
+        detector,
+        &link_managers,
+        &config.languages.primary,
+        query.dry_run,
+    )
+    .await;
     Ok(Json(result))
 }

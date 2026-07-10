@@ -42,6 +42,7 @@ struct WalkCtx<'a, P: FfprobeProber> {
     all_instances: &'a [InstanceConfig],
     detector: &'a LanguageDetector<P>,
     link_managers: &'a [(String, LinkManager)],
+    primary_language: &'a str,
     dry_run: bool,
 }
 
@@ -53,6 +54,7 @@ pub async fn regenerate_all<P: FfprobeProber>(
     instances: &[InstanceConfig],
     detector: &LanguageDetector<P>,
     link_managers: &[(String, LinkManager)],
+    primary_language: &str,
     dry_run: bool,
 ) -> RegenerateResult {
     let mut result = RegenerateResult {
@@ -68,6 +70,7 @@ pub async fn regenerate_all<P: FfprobeProber>(
         all_instances: instances,
         detector,
         link_managers,
+        primary_language,
         dry_run,
     };
 
@@ -143,8 +146,11 @@ async fn regenerate_movies<P: FfprobeProber>(
             continue;
         }
 
-        // Audio-truth gate (observe-only): inventory existing on-disk files
-        // with no language-appropriate <=5.1 base track. Linking is unchanged.
+        // Audio-truth gate (deliberately observe-only — see
+        // plan/decisions/audio-gate-stays-observe-only.md). Inventory on-disk
+        // files with no language-appropriate <=5.1 base track; linking is
+        // intentionally unchanged (tags unreliable, last-resort language allowed
+        // by design).
         if !ctx
             .detector
             .has_base_audio_track(&detection.audio_streams, &instance.language)
@@ -163,7 +169,12 @@ async fn regenerate_movies<P: FfprobeProber>(
         }
 
         let source_path = instance.storage_path.join(&folder_name);
-        let targets = resolve_targets(instance, ctx.all_instances, &detection);
+        let targets = resolve_targets(
+            instance,
+            ctx.all_instances,
+            &detection,
+            ctx.primary_language,
+        );
 
         let spec = LinkSpec {
             detection: &detection,
@@ -275,8 +286,11 @@ async fn walk_season_files<P: FfprobeProber>(
             continue;
         }
 
-        // Audio-truth gate (observe-only): inventory existing on-disk files
-        // with no language-appropriate <=5.1 base track. Linking is unchanged.
+        // Audio-truth gate (deliberately observe-only — see
+        // plan/decisions/audio-gate-stays-observe-only.md). Inventory on-disk
+        // files with no language-appropriate <=5.1 base track; linking is
+        // intentionally unchanged (tags unreliable, last-resort language allowed
+        // by design).
         if !ctx
             .detector
             .has_base_audio_track(&detection.audio_streams, &instance.language)
@@ -301,7 +315,12 @@ async fn walk_season_files<P: FfprobeProber>(
             .into_owned();
         let relative = Path::new(series_name).join(season_name).join(&file_name);
         let source_path = instance.storage_path.join(&relative);
-        let targets = resolve_targets(instance, ctx.all_instances, &detection);
+        let targets = resolve_targets(
+            instance,
+            ctx.all_instances,
+            &detection,
+            ctx.primary_language,
+        );
 
         let lossy = relative.to_string_lossy();
         let spec = LinkSpec {
@@ -316,22 +335,38 @@ async fn walk_season_files<P: FfprobeProber>(
 }
 
 /// Determine which instances should receive a link for detected media.
+///
+/// Mirrors the import handler exactly (see `handler::import::primary_link_targets`
+/// and `link_sonarr_alternate`). The two used to diverge: reconcile fanned out
+/// *any* multi-audio file, so an alternate's `MULTi` release was linked into the
+/// primary's library on every regenerate, while the live import path never did
+/// that. Keeping one rule in two places is how a sweep silently undoes itself.
 fn resolve_targets<'a>(
-    source_instance: &InstanceConfig,
+    source_instance: &'a InstanceConfig,
     all_instances: &'a [InstanceConfig],
     detection: &DetectionResult,
+    primary_language: &str,
 ) -> Vec<&'a InstanceConfig> {
-    if detection.is_multi_audio {
-        all_instances
+    if source_instance.language == primary_language {
+        let mut targets: Vec<&InstanceConfig> = all_instances
             .iter()
             .filter(|i| i.kind == source_instance.kind && detection.languages.contains(&i.language))
-            .collect()
-    } else {
-        all_instances
-            .iter()
-            .filter(|i| i.name == source_instance.name)
-            .collect()
+            .collect();
+        if !targets.iter().any(|i| i.name == source_instance.name) {
+            targets.push(source_instance);
+        }
+        return targets;
     }
+
+    // Alternate instances only ever serve their own library, and only when the
+    // file actually carries their language.
+    if !detection.languages.contains(&source_instance.language) {
+        return vec![];
+    }
+    all_instances
+        .iter()
+        .filter(|i| i.name == source_instance.name)
+        .collect()
 }
 
 /// Describes a single detected media file ready for linking.
@@ -558,6 +593,7 @@ mod tests {
             &[inst.clone()],
             &detector,
             &[(inst.name.clone(), mgr)],
+            "fr",
             true, // dry_run
         )
         .await;
@@ -597,6 +633,7 @@ mod tests {
             &[inst.clone()],
             &detector,
             &[(inst.name.clone(), mgr)],
+            "fr",
             false, // live
         )
         .await;
@@ -645,6 +682,7 @@ mod tests {
             &[inst.clone()],
             &detector,
             &[(inst.name.clone(), mgr)],
+            "fr",
             false,
         )
         .await;
@@ -705,7 +743,7 @@ mod tests {
             (inst_en.name.clone(), mgr_en),
         ];
 
-        let result = regenerate_all(&instances, &detector, &managers, false).await;
+        let result = regenerate_all(&instances, &detector, &managers, "fr", false).await;
 
         assert_eq!(result.scanned, 1);
         assert_eq!(result.linked, 2);
@@ -741,6 +779,7 @@ mod tests {
             &[inst.clone()],
             &detector,
             &[(inst.name.clone(), mgr)],
+            "fr",
             false,
         )
         .await;
@@ -767,7 +806,7 @@ mod tests {
         };
 
         let all = vec![inst_fr.clone(), inst_en.clone(), inst_sonarr];
-        let targets = resolve_targets(&inst_fr, &all, &detection);
+        let targets = resolve_targets(&inst_fr, &all, &detection, "fr");
 
         // Only Radarr instances with matching languages.
         assert_eq!(targets.len(), 2);
@@ -792,7 +831,7 @@ mod tests {
         };
 
         let all = vec![inst_fr.clone(), inst_en];
-        let targets = resolve_targets(&inst_fr, &all, &detection);
+        let targets = resolve_targets(&inst_fr, &all, &detection, "fr");
 
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].name, "radarr-fr");

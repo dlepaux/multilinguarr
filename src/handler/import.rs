@@ -23,7 +23,7 @@ use super::registry::HandlerRegistry;
 use crate::config::{InstanceConfig, InstanceKind, LinkStrategy};
 use crate::detection::{DetectionResult, FfprobeProber};
 use crate::link::LinkManager;
-use crate::webhook::{RadarrDownload, SonarrDownload};
+use crate::webhook::{RadarrDownload, SonarrDownload, SonarrSeriesRef};
 
 fn strategy_label(strategy: LinkStrategy) -> &'static str {
     match strategy {
@@ -115,9 +115,11 @@ pub async fn handle_radarr_download<P: FfprobeProber>(
             "language detection complete",
         );
 
-        // Audio-truth gate (observe-only): flag imports whose audio has no
-        // language-appropriate <=5.1 base track. The counter is the alertable
-        // signal; linking is unchanged until enforcement lands (plan Phase 4).
+        // Audio-truth gate (deliberately observe-only — see
+        // plan/decisions/audio-gate-stays-observe-only.md). The counter is the
+        // alertable signal for human review; linking is intentionally NOT gated
+        // on it, because in-file language tags are unreliable (mis-tagged multi
+        // releases) and the primary profile may allow a last-resort fallback.
         if !registry
             .detector
             .has_base_audio_track(&detection.audio_streams, &instance.language)
@@ -143,9 +145,7 @@ pub async fn handle_radarr_download<P: FfprobeProber>(
 
         if registry.is_primary(instance) {
             link_radarr_primary(registry, instance, &detection, &source_path, folder_name).await?;
-            if !detection.is_multi_audio {
-                propagate_add_movie(registry, instance, movie_ref).await?;
-            }
+            propagate_add_movie(registry, instance, movie_ref, &detection.languages).await?;
         } else {
             link_radarr_alternate(registry, instance, &detection, &source_path, folder_name)
                 .await?;
@@ -165,21 +165,36 @@ async fn link_radarr_primary<P: FfprobeProber>(
     source_path: &Path,
     folder_name: &str,
 ) -> Result<(), HandlerError> {
-    if detection.is_multi_audio {
-        let targets = registry.instances_for_languages(InstanceKind::Radarr, &detection.languages);
-        info!(
-            target_count = targets.len(),
-            "primary multi-audio import → linking to every matching language library"
-        );
-        for target in targets {
-            let mgr = registry.link_manager(&target.name)?;
-            link_movie_with_log(mgr, source_path, folder_name, &target.name).await?;
-        }
-    } else {
-        let mgr = registry.link_manager(&primary.name)?;
-        link_movie_with_log(mgr, source_path, folder_name, &primary.name).await?;
+    for target in primary_link_targets(registry, primary, detection, InstanceKind::Radarr) {
+        let mgr = registry.link_manager(&target.name)?;
+        link_movie_with_log(mgr, source_path, folder_name, &target.name).await?;
     }
     Ok(())
+}
+
+/// Libraries that should receive a link for a file the *primary* imported.
+///
+/// Language-driven, not role-driven: every instance whose language the file
+/// actually carries gets a link to the one storage copy. The primary's own
+/// library is always included — it is where the operator requested the media,
+/// even when the file carries none of the primary's language (a VOSTFR grab:
+/// English audio, French subtitles).
+fn primary_link_targets<'a, P: FfprobeProber>(
+    registry: &'a HandlerRegistry<P>,
+    primary: &'a InstanceConfig,
+    detection: &DetectionResult,
+    kind: InstanceKind,
+) -> Vec<&'a InstanceConfig> {
+    let mut targets = registry.instances_for_languages(kind, &detection.languages);
+    if !targets.iter().any(|t| t.name == primary.name) {
+        targets.push(primary);
+    }
+    info!(
+        target_count = targets.len(),
+        is_multi_audio = detection.is_multi_audio,
+        "primary import → linking into every library this file can serve"
+    );
+    targets
 }
 
 async fn link_radarr_alternate<P: FfprobeProber>(
@@ -335,9 +350,11 @@ pub async fn handle_sonarr_download<P: FfprobeProber>(
             "language detection complete",
         );
 
-        // Audio-truth gate (observe-only): flag imports whose audio has no
-        // language-appropriate <=5.1 base track. The counter is the alertable
-        // signal; linking is unchanged until enforcement lands (plan Phase 4).
+        // Audio-truth gate (deliberately observe-only — see
+        // plan/decisions/audio-gate-stays-observe-only.md). The counter is the
+        // alertable signal for human review; linking is intentionally NOT gated
+        // on it, because in-file language tags are unreliable (mis-tagged multi
+        // releases) and the primary profile may allow a last-resort fallback.
         if !registry
             .detector
             .has_base_audio_track(&detection.audio_streams, &instance.language)
@@ -361,16 +378,19 @@ pub async fn handle_sonarr_download<P: FfprobeProber>(
             unlink_sonarr_targets(registry, instance, &detection, &relative_path).await?;
         }
 
-        if registry.is_primary(instance) {
-            link_sonarr_primary(registry, instance, &detection, &source_path, &relative_path)
-                .await?;
-            if !detection.is_multi_audio {
-                propagate_add_series(registry, instance, series_ref).await?;
-            }
-        } else {
-            link_sonarr_alternate(registry, instance, &detection, &source_path, &relative_path)
-                .await?;
-        }
+        let import = SonarrImport {
+            series_ref,
+            detection: &detection,
+            source_path: &source_path,
+            relative_path: &relative_path,
+            // Episode identity comes from the webhook, not the filename: a
+            // bare `info[EZTVx.to].mkv` carries no SxxEyy tokens of its own.
+            episode: event
+                .episodes
+                .first()
+                .map(|e| (e.season_number, e.episode_number)),
+        };
+        dispatch_sonarr_link(registry, instance, &import).await?;
 
         registry.jellyfin.refresh().await;
         Ok(())
@@ -379,28 +399,154 @@ pub async fn handle_sonarr_download<P: FfprobeProber>(
     .await
 }
 
+/// Everything one imported episode needs in order to be linked. Bundled to
+/// keep the dispatch signature under clippy's argument limit.
+struct SonarrImport<'a> {
+    series_ref: &'a SonarrSeriesRef,
+    detection: &'a DetectionResult,
+    source_path: &'a Path,
+    relative_path: &'a Path,
+    episode: Option<(u32, u32)>,
+}
+
+/// Route an imported episode to the primary or alternate linking path, then
+/// backfill any language this file cannot serve via a cross-instance add.
+async fn dispatch_sonarr_link<P: FfprobeProber>(
+    registry: &HandlerRegistry<P>,
+    instance: &InstanceConfig,
+    import: &SonarrImport<'_>,
+) -> Result<(), HandlerError> {
+    let SonarrImport {
+        series_ref,
+        detection,
+        source_path,
+        relative_path,
+        episode,
+    } = *import;
+
+    if registry.is_primary(instance) {
+        link_sonarr_primary(
+            registry,
+            instance,
+            detection,
+            source_path,
+            relative_path,
+            episode,
+        )
+        .await?;
+        propagate_add_series(registry, instance, series_ref, &detection.languages).await?;
+    } else {
+        link_sonarr_alternate(
+            registry,
+            instance,
+            detection,
+            source_path,
+            relative_path,
+            episode,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn link_sonarr_primary<P: FfprobeProber>(
     registry: &HandlerRegistry<P>,
     primary: &InstanceConfig,
     detection: &DetectionResult,
     source_path: &Path,
     relative_path: &Path,
+    episode: Option<(u32, u32)>,
 ) -> Result<(), HandlerError> {
-    if detection.is_multi_audio {
-        let targets = registry.instances_for_languages(InstanceKind::Sonarr, &detection.languages);
-        info!(
-            target_count = targets.len(),
-            "primary multi-audio episode import → linking into matching language libraries"
-        );
-        for target in targets {
-            let mgr = registry.link_manager(&target.name)?;
-            link_episode_with_log(mgr, source_path, relative_path, &target.name).await?;
-        }
-    } else {
-        let mgr = registry.link_manager(&primary.name)?;
-        link_episode_with_log(mgr, source_path, relative_path, &primary.name).await?;
+    for target in primary_link_targets(registry, primary, detection, InstanceKind::Sonarr) {
+        link_episode_deduped(
+            registry,
+            primary,
+            target,
+            source_path,
+            relative_path,
+            episode,
+        )
+        .await?;
     }
     Ok(())
+}
+
+/// Link one episode into `target`, enforcing **one file per `SxxEyy` per
+/// library**.
+///
+/// Two releases of the same episode (a French `MULTi` and a native English
+/// grab) both legitimately carry English audio, so both are eligible for the
+/// English library. Jellyfin has no way to stack them — release filenames
+/// never match its version convention — so it renders two episodes. The
+/// keep-policy resolves the tie: the release whose *source instance* speaks
+/// the library's language wins, because that is the native-audio copy.
+/// Ties and unidentifiable owners keep the incumbent, so the outcome does not
+/// depend on import order.
+async fn link_episode_deduped<P: FfprobeProber>(
+    registry: &HandlerRegistry<P>,
+    source_instance: &InstanceConfig,
+    target: &InstanceConfig,
+    source_path: &Path,
+    relative_path: &Path,
+    episode: Option<(u32, u32)>,
+) -> Result<(), HandlerError> {
+    let mgr = registry.link_manager(&target.name)?;
+
+    if let Some((season, number)) = episode {
+        if let Some(existing) = mgr
+            .find_conflicting_episode_link(relative_path, season, number)
+            .await?
+        {
+            let incumbent_is_native = owner_language(registry, &existing)
+                .await
+                .is_some_and(|lang| lang == target.language);
+            let challenger_is_native = source_instance.language == target.language;
+
+            if incumbent_is_native || !challenger_is_native {
+                metrics::counter!(
+                    crate::observability::names::DUPLICATE_LINK_SKIPPED,
+                    "instance" => target.name.clone(),
+                    "outcome" => "skipped",
+                )
+                .increment(1);
+                info!(
+                    target = %target.name,
+                    existing = %existing.display(),
+                    "episode already linked from another release — skipping duplicate"
+                );
+                return Ok(());
+            }
+
+            mgr.unlink_absolute(&existing).await?;
+            metrics::counter!(
+                crate::observability::names::DUPLICATE_LINK_SKIPPED,
+                "instance" => target.name.clone(),
+                "outcome" => "replaced",
+            )
+            .increment(1);
+            info!(
+                target = %target.name,
+                evicted = %existing.display(),
+                "evicted non-native-language link in favour of native release"
+            );
+        }
+    }
+
+    link_episode_with_log(mgr, source_path, relative_path, &target.name).await
+}
+
+/// Language of the instance whose storage backs `link`, or `None` when the
+/// link cannot be resolved (hardlink strategy, or a foreign target).
+async fn owner_language<P: FfprobeProber>(
+    registry: &HandlerRegistry<P>,
+    link: &Path,
+) -> Option<String> {
+    let target = tokio::fs::read_link(link).await.ok()?;
+    registry
+        .config_instances()
+        .iter()
+        .find(|i| target.starts_with(&i.storage_path))
+        .map(|i| i.language.clone())
 }
 
 async fn link_sonarr_alternate<P: FfprobeProber>(
@@ -409,6 +555,7 @@ async fn link_sonarr_alternate<P: FfprobeProber>(
     detection: &DetectionResult,
     source_path: &Path,
     relative_path: &Path,
+    episode: Option<(u32, u32)>,
 ) -> Result<(), HandlerError> {
     if !detection.languages.contains(&alternate.language) {
         warn!(
@@ -434,8 +581,15 @@ async fn link_sonarr_alternate<P: FfprobeProber>(
         .increment(1);
         return Ok(());
     }
-    let mgr = registry.link_manager(&alternate.name)?;
-    link_episode_with_log(mgr, source_path, relative_path, &alternate.name).await
+    link_episode_deduped(
+        registry,
+        alternate,
+        alternate,
+        source_path,
+        relative_path,
+        episode,
+    )
+    .await
 }
 
 async fn link_episode_with_log(

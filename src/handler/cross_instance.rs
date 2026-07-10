@@ -51,7 +51,12 @@ pub async fn propagate_add_movie<P: FfprobeProber>(
     registry: &HandlerRegistry<P>,
     source_instance: &InstanceConfig,
     movie_ref: &RadarrMovieRef,
+    detected_languages: &std::collections::HashSet<String>,
 ) -> Result<(), HandlerError> {
+    // Only ask a sibling to fetch a language THIS file cannot already serve.
+    // A VOSTFR grab (English audio) imported by the French primary already
+    // satisfies English — propagating it would download a redundant copy of
+    // the same movie into the English instance.
     let targets: Vec<&InstanceConfig> = registry
         .config_instances()
         .iter()
@@ -59,6 +64,7 @@ pub async fn propagate_add_movie<P: FfprobeProber>(
             i.kind == InstanceKind::Radarr
                 && i.name != source_instance.name
                 && i.language != source_instance.language
+                && !detected_languages.contains(&i.language)
         })
         .collect();
 
@@ -244,14 +250,10 @@ pub async fn propagate_add_series<P: FfprobeProber>(
     registry: &HandlerRegistry<P>,
     source_instance: &InstanceConfig,
     series_ref: &SonarrSeriesRef,
+    detected_languages: &std::collections::HashSet<String>,
 ) -> Result<(), HandlerError> {
-    let source_client = registry.client(&source_instance.name)?;
-    let ArrClient::Sonarr(source_sonarr) = source_client else {
-        return Ok(());
-    };
-    let seasons =
-        fetch_source_seasons(source_sonarr, &source_instance.name, series_ref.tvdb_id).await?;
-
+    // See `propagate_add_movie`: never ask a sibling to grab a language the
+    // imported file already carries.
     let targets: Vec<&InstanceConfig> = registry
         .config_instances()
         .iter()
@@ -259,8 +261,20 @@ pub async fn propagate_add_series<P: FfprobeProber>(
             i.kind == InstanceKind::Sonarr
                 && i.name != source_instance.name
                 && i.language != source_instance.language
+                && !detected_languages.contains(&i.language)
         })
         .collect();
+
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let source_client = registry.client(&source_instance.name)?;
+    let ArrClient::Sonarr(source_sonarr) = source_client else {
+        return Ok(());
+    };
+    let seasons =
+        fetch_source_seasons(source_sonarr, &source_instance.name, series_ref.tvdb_id).await?;
 
     for target in targets {
         let target_client = registry.client(&target.name)?;

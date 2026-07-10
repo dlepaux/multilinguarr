@@ -1611,3 +1611,239 @@ fn unknown_instance_is_permanent() {
     let err = HandlerError::UnknownInstance("nope".to_owned());
     assert!(!err.is_transient());
 }
+
+// =====================================================================
+// Language-driven linking + per-library episode de-duplication
+//
+// Regression cover for the two defects that produced ~416 redundant
+// library symlinks and one redundant multi-GB download:
+//   1. the primary propagated an add for a language its own file already
+//      carried (VOSTFR grab -> sibling re-downloads the same movie);
+//   2. nothing enforced one file per SxxEyy per library, so a primary
+//      MULTi link and an alternate native grab both landed in the
+//      English library and Jellyfin rendered two episodes.
+// =====================================================================
+
+/// Build a Sonarr download event for an explicit episode filename, so a
+/// test can stage two *different* releases of the same `SxxEyy`.
+fn sonarr_download_event_named(
+    series_path: &str,
+    episode_path: &str,
+    relative: &str,
+) -> SonarrDownload {
+    let mut event = sonarr_download_event(series_path, episode_path);
+    event.episode_file = Some(SonarrEpisodeFileRef {
+        id: 100,
+        path: Some(episode_path.to_owned()),
+        relative_path: Some(relative.to_owned()),
+        ..Default::default()
+    });
+    event
+}
+
+async fn write_named_episode(series_dir: &Path, file_name: &str, contents: &str) -> PathBuf {
+    let dir = series_dir.join("Season 01");
+    fs::create_dir_all(&dir).await.unwrap();
+    let path = dir.join(file_name);
+    fs::write(&path, contents).await.unwrap();
+    path
+}
+
+#[tokio::test]
+async fn radarr_primary_alternate_language_file_links_both_libraries_without_propagating() {
+    let rig = Rig::new().await;
+    let folder = rig.primary_storage.join("VOSTFR (2026)");
+    write_movie_file(&folder, "en-audio-fr-subs").await;
+
+    // Deliberately mount NO add/lookup mocks on the alt server: any
+    // cross-instance propagation would hit an unmatched route and the
+    // handler would return Err. Reaching `.unwrap()` proves we did not
+    // ask radarr-en to re-download a movie we already hold in English.
+    let cfg = rig.config_radarr();
+    let primary = cfg.instances[0].clone();
+    let file_path = folder.join("movie.mkv");
+    let event = radarr_download_event(folder.to_str().unwrap(), file_path.to_str().unwrap());
+    let registry = Rig::registry(cfg, en_only_streams());
+
+    handle_radarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    // The single storage copy serves both libraries.
+    assert_eq!(
+        fs::read_to_string(rig.primary_library.join("VOSTFR (2026)/movie.mkv"))
+            .await
+            .unwrap(),
+        "en-audio-fr-subs",
+        "primary library keeps the movie it was asked to fetch"
+    );
+    assert_eq!(
+        fs::read_to_string(rig.alt_library.join("VOSTFR (2026)/movie.mkv"))
+            .await
+            .unwrap(),
+        "en-audio-fr-subs",
+        "english library is served by the same file, not a second download"
+    );
+}
+
+#[tokio::test]
+async fn sonarr_primary_alternate_language_file_links_both_libraries_without_propagating() {
+    let rig = Rig::new().await;
+    let series = rig.primary_storage.join("Show");
+    write_episode_file(&series, "en-audio").await;
+
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    let episode_path = series.join("Season 01/S01E01.mkv");
+    let event = sonarr_download_event(series.to_str().unwrap(), episode_path.to_str().unwrap());
+    let registry = Rig::registry(cfg, en_only_streams());
+
+    handle_sonarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    assert!(
+        fs::try_exists(rig.primary_library.join("Show/Season 01/S01E01.mkv"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        fs::try_exists(rig.alt_library.join("Show/Season 01/S01E01.mkv"))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn sonarr_native_alternate_release_evicts_primary_multi_link_in_its_own_library() {
+    let rig = Rig::new().await;
+
+    // 1. Primary imports a MULTi release (fr + en). It fans out into both
+    //    libraries, because it can legitimately serve both.
+    let primary_series = rig.primary_storage.join("Show");
+    let multi_path = write_named_episode(&primary_series, "S01E01.MULTi-TyHD.mkv", "multi").await;
+    let multi_event = sonarr_download_event_named(
+        primary_series.to_str().unwrap(),
+        multi_path.to_str().unwrap(),
+        "Season 01/S01E01.MULTi-TyHD.mkv",
+    );
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    handle_sonarr_download(
+        &primary,
+        &multi_event,
+        &Rig::registry(cfg, multi_audio_streams()),
+    )
+    .await
+    .unwrap();
+
+    let multi_in_en = rig.alt_library.join("Show/Season 01/S01E01.MULTi-TyHD.mkv");
+    assert!(
+        fs::try_exists(&multi_in_en).await.unwrap(),
+        "multi fans out"
+    );
+
+    // 2. The English instance then imports its own native English release
+    //    of the SAME episode. Both files carry English, so without a
+    //    de-dup rule the English library would show S01E01 twice.
+    let alt_series = rig.alt_storage.join("Show");
+    let en_path = write_named_episode(&alt_series, "S01E01.EN-EDITH.mkv", "english").await;
+    let en_event = sonarr_download_event_named(
+        alt_series.to_str().unwrap(),
+        en_path.to_str().unwrap(),
+        "Season 01/S01E01.EN-EDITH.mkv",
+    );
+    let cfg = rig.config_sonarr();
+    let alternate = cfg.instances[1].clone();
+    handle_sonarr_download(
+        &alternate,
+        &en_event,
+        &Rig::registry(cfg, en_only_streams()),
+    )
+    .await
+    .unwrap();
+
+    // The native English release wins its own library...
+    assert_eq!(
+        fs::read_to_string(rig.alt_library.join("Show/Season 01/S01E01.EN-EDITH.mkv"))
+            .await
+            .unwrap(),
+        "english"
+    );
+    assert!(
+        !fs::try_exists(&multi_in_en).await.unwrap(),
+        "the non-native MULTi link must be evicted, not left as a duplicate episode"
+    );
+
+    // ...and the French library still holds the MULTi release untouched.
+    assert_eq!(
+        fs::read_to_string(
+            rig.primary_library
+                .join("Show/Season 01/S01E01.MULTi-TyHD.mkv")
+        )
+        .await
+        .unwrap(),
+        "multi"
+    );
+}
+
+#[tokio::test]
+async fn sonarr_non_native_release_does_not_displace_incumbent_native_link() {
+    let rig = Rig::new().await;
+
+    // English instance already holds the native English release.
+    let alt_series = rig.alt_storage.join("Show");
+    let en_path = write_named_episode(&alt_series, "S01E01.EN-EDITH.mkv", "english").await;
+    let en_event = sonarr_download_event_named(
+        alt_series.to_str().unwrap(),
+        en_path.to_str().unwrap(),
+        "Season 01/S01E01.EN-EDITH.mkv",
+    );
+    let cfg = rig.config_sonarr();
+    let alternate = cfg.instances[1].clone();
+    handle_sonarr_download(
+        &alternate,
+        &en_event,
+        &Rig::registry(cfg, en_only_streams()),
+    )
+    .await
+    .unwrap();
+
+    // Now the French primary imports a MULTi release of the same episode.
+    let primary_series = rig.primary_storage.join("Show");
+    let multi_path = write_named_episode(&primary_series, "S01E01.MULTi-TyHD.mkv", "multi").await;
+    let multi_event = sonarr_download_event_named(
+        primary_series.to_str().unwrap(),
+        multi_path.to_str().unwrap(),
+        "Season 01/S01E01.MULTi-TyHD.mkv",
+    );
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    handle_sonarr_download(
+        &primary,
+        &multi_event,
+        &Rig::registry(cfg, multi_audio_streams()),
+    )
+    .await
+    .unwrap();
+
+    // English library keeps its native file; the MULTi is skipped there.
+    assert!(
+        fs::try_exists(rig.alt_library.join("Show/Season 01/S01E01.EN-EDITH.mkv"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !fs::try_exists(rig.alt_library.join("Show/Season 01/S01E01.MULTi-TyHD.mkv"))
+            .await
+            .unwrap(),
+        "import order must not decide which release survives"
+    );
+    // French library gets the MULTi, as it is the only fr-capable file.
+    assert!(fs::try_exists(
+        rig.primary_library
+            .join("Show/Season 01/S01E01.MULTi-TyHD.mkv")
+    )
+    .await
+    .unwrap());
+}

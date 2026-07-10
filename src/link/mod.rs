@@ -296,6 +296,74 @@ impl LinkManager {
         }
     }
 
+    /// Find an existing link in the same season folder that resolves to the
+    /// *same episode* as `relative` but comes from a different release file.
+    ///
+    /// This is what prevents two files for one `SxxEyy` from coexisting in a
+    /// single library — Jellyfin renders those as two distinct episodes,
+    /// because release filenames never satisfy its version-stacking
+    /// convention. Matching is done on the `SxxEyy` marker rather than on the
+    /// filename, since two releases of one episode share nothing else.
+    ///
+    /// Returns `None` when the season folder does not exist yet, or when no
+    /// other file claims `(season, episode)`.
+    ///
+    /// # Errors
+    ///
+    /// - [`LinkError::InvalidRelativePath`] if `relative` is absolute or contains `..`.
+    /// - [`LinkError::Io`] on filesystem failure.
+    pub async fn find_conflicting_episode_link(
+        &self,
+        relative: &Path,
+        season: u32,
+        episode: u32,
+    ) -> Result<Option<PathBuf>, LinkError> {
+        reject_unsafe_relative(relative)?;
+
+        let target = self.library_root.join(relative);
+        let Some(season_dir) = target.parent() else {
+            return Ok(None);
+        };
+        let incoming_name = relative.file_name();
+
+        let mut entries = match fs::read_dir(season_dir).await {
+            Ok(entries) => entries,
+            // Season folder not created yet — nothing can conflict.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(LinkError::from_io(season_dir.to_path_buf(), e)),
+        };
+
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| LinkError::from_io(season_dir.to_path_buf(), e))?
+        {
+            let name = entry.file_name();
+            if Some(name.as_os_str()) == incoming_name {
+                continue;
+            }
+            let Some(name) = name.to_str() else { continue };
+            if parse_season_episode(name) == Some((season, episode)) {
+                return Ok(Some(entry.path()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Remove a link by absolute path. Used by the de-duplication path to
+    /// evict a losing link; never touches the storage file it points at.
+    ///
+    /// # Errors
+    ///
+    /// - [`LinkError::InvalidRelativePath`] if `path` escapes the library root.
+    /// - [`LinkError::Io`] / [`LinkError::PermissionDenied`] on filesystem failure.
+    pub async fn unlink_absolute(&self, path: &Path) -> Result<(), LinkError> {
+        let relative = path
+            .strip_prefix(&self.library_root)
+            .map_err(|_| LinkError::InvalidRelativePath(path.to_path_buf()))?;
+        self.unlink_episode(relative).await
+    }
+
     /// Remove a linked episode file. Prunes empty parent directories
     /// up to (but not past) the library root.
     ///
@@ -324,6 +392,50 @@ impl LinkManager {
 // ---------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------
+
+/// Extract a `SxxEyy` season/episode marker from a release filename.
+///
+/// Deliberately hand-rolled rather than pulling in `regex`: the grammar is
+/// `S<digits>E<digits>`, case-insensitive, anywhere in the name. Returns the
+/// first match so that `Show.S09E05.1080p-GRP.mkv` yields `(9, 5)`.
+pub(crate) fn parse_season_episode(name: &str) -> Option<(u32, u32)> {
+    let bytes = name.as_bytes();
+    for (i, b) in bytes.iter().enumerate() {
+        if !b.eq_ignore_ascii_case(&b'S') {
+            continue;
+        }
+        // Every failure below must resume the scan, not abort it: the first
+        // `s` in `show.s103e04.mkv` is not the marker.
+        let Some((season, next)) = take_number(bytes, i + 1) else {
+            continue;
+        };
+        let Some(marker) = bytes.get(next) else {
+            continue;
+        };
+        if !marker.eq_ignore_ascii_case(&b'E') {
+            continue;
+        }
+        let Some((episode, _)) = take_number(bytes, next + 1) else {
+            continue;
+        };
+        return Some((season, episode));
+    }
+    None
+}
+
+/// Read a run of ASCII digits starting at `from`, returning the value and the
+/// index just past it. `None` when there is no digit at `from`.
+fn take_number(bytes: &[u8], from: usize) -> Option<(u32, usize)> {
+    let end = bytes[from..]
+        .iter()
+        .position(|b| !b.is_ascii_digit())
+        .map_or(bytes.len(), |off| from + off);
+    if end == from {
+        return None;
+    }
+    let value: u32 = std::str::from_utf8(&bytes[from..end]).ok()?.parse().ok()?;
+    Some((value, end))
+}
 
 /// Reject absolute paths and `..` traversal — the link manager only
 /// accepts relative, well-behaved descendants.

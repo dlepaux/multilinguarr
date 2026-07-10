@@ -51,8 +51,13 @@ pub mod names {
     /// Counter — files skipped because detected language ≠ expected (story 05).
     pub const WRONG_LANGUAGE_SKIP: &str = "multilinguarr_wrong_language_skip_total";
     /// Counter — imports with no language-appropriate ≤5.1 base audio track
-    /// (title-liar candidate). Observe-only; auto-recovery wiring is later.
+    /// (title-liar candidate). Observe-only by design — see
+    /// plan/decisions/audio-gate-stays-observe-only.md.
     pub const AUDIO_SKIPPED: &str = "multilinguarr_audio_skipped_total";
+    /// Counter — a link was not created because another release already claims
+    /// the same `SxxEyy` in that library, or an existing link was evicted in
+    /// favour of a native-language release. `outcome` is `skipped` | `replaced`.
+    pub const DUPLICATE_LINK_SKIPPED: &str = "multilinguarr_duplicate_link_skipped_total";
 }
 
 /// DLQ gauge polling interval.

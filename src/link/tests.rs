@@ -563,3 +563,40 @@ async fn symlink_refuses_to_overwrite_unrelated_target() {
     // Bystander untouched.
     assert_eq!(read_file(&sandbox.library.join("Movie")).await, "existing");
 }
+
+// ---------------------------------------------------------------------
+// SxxEyy marker parsing — the de-dup key for episode links.
+// ---------------------------------------------------------------------
+
+#[test]
+fn parses_season_episode_from_typical_release_names() {
+    use super::parse_season_episode;
+
+    assert_eq!(
+        parse_season_episode("Rick.and.Morty.S09E05.1080p.WEB.h264-EDITH.mkv"),
+        Some((9, 5))
+    );
+    assert_eq!(
+        parse_season_episode("Rick and Morty S09E07 Mortgully 1080p-FLUX.mkv"),
+        Some((9, 7))
+    );
+    // Lowercase, and a three-digit season.
+    assert_eq!(parse_season_episode("show.s103e04.mkv"), Some((103, 4)));
+    // Jellyfin-style naming.
+    assert_eq!(
+        parse_season_episode("Show - S01E11 - Ricksy Business.mkv"),
+        Some((1, 11))
+    );
+}
+
+#[test]
+fn rejects_names_without_a_season_episode_marker() {
+    use super::parse_season_episode;
+
+    // The bare EZTV payload that Sonarr itself cannot parse.
+    assert_eq!(parse_season_episode("info[EZTVx.to].mkv"), None);
+    assert_eq!(parse_season_episode("movie.mkv"), None);
+    // `S` not followed by digits, and `S<digits>` not followed by `E`.
+    assert_eq!(parse_season_episode("Sabrina.mkv"), None);
+    assert_eq!(parse_season_episode("S09.Complete.mkv"), None);
+}
