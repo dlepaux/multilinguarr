@@ -501,43 +501,37 @@ async fn link_episode_deduped<P: FfprobeProber>(
             .await?
         {
             let incumbent = owner_instance(registry, &existing).await;
-
-            // An instance always replaces its OWN link for an episode: this is
-            // an upgrade or re-import, not a cross-instance duplicate. The old
-            // link carries the previous release's filename, so the upgrade
-            // unlink (which matches on the new name) cannot have removed it.
-            let incumbent_is_self = incumbent.is_some_and(|i| i.name == source_instance.name);
-
-            let incumbent_is_native = incumbent.is_some_and(|i| i.language == target.language);
-            let challenger_is_native = source_instance.language == target.language;
-
-            if !incumbent_is_self && (incumbent_is_native || !challenger_is_native) {
-                metrics::counter!(
-                    crate::observability::names::DUPLICATE_LINK_SKIPPED,
-                    "instance" => target.name.clone(),
-                    "outcome" => "skipped",
-                )
-                .increment(1);
-                info!(
-                    target = %target.name,
-                    existing = %existing.display(),
-                    "episode already linked from another release — skipping duplicate"
-                );
-                return Ok(());
+            match crate::link::dedup_verdict(incumbent, source_instance, target) {
+                crate::link::DedupVerdict::Skip => {
+                    metrics::counter!(
+                        crate::observability::names::DUPLICATE_LINK_SKIPPED,
+                        "instance" => target.name.clone(),
+                        "outcome" => "skipped",
+                    )
+                    .increment(1);
+                    info!(
+                        target = %target.name,
+                        existing = %existing.display(),
+                        "episode already linked from another release — skipping duplicate"
+                    );
+                    return Ok(());
+                }
+                crate::link::DedupVerdict::Replace => {
+                    mgr.unlink_absolute(&existing).await?;
+                    metrics::counter!(
+                        crate::observability::names::DUPLICATE_LINK_SKIPPED,
+                        "instance" => target.name.clone(),
+                        "outcome" => "replaced",
+                    )
+                    .increment(1);
+                    info!(
+                        target = %target.name,
+                        evicted = %existing.display(),
+                        "evicted losing link in favour of this release"
+                    );
+                }
+                crate::link::DedupVerdict::Link => {}
             }
-
-            mgr.unlink_absolute(&existing).await?;
-            metrics::counter!(
-                crate::observability::names::DUPLICATE_LINK_SKIPPED,
-                "instance" => target.name.clone(),
-                "outcome" => "replaced",
-            )
-            .increment(1);
-            info!(
-                target = %target.name,
-                evicted = %existing.display(),
-                "evicted non-native-language link in favour of native release"
-            );
         }
     }
 

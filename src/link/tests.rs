@@ -600,3 +600,72 @@ fn rejects_names_without_a_season_episode_marker() {
     assert_eq!(parse_season_episode("Sabrina.mkv"), None);
     assert_eq!(parse_season_episode("S09.Complete.mkv"), None);
 }
+
+// ---------------------------------------------------------------------
+// dedup_verdict — the single keep-policy shared by import + reconcile.
+// ---------------------------------------------------------------------
+
+#[cfg(test)]
+mod dedup_policy {
+    use super::super::{dedup_verdict, DedupVerdict};
+    use crate::config::{InstanceConfig, InstanceKind, LinkStrategy};
+    use std::path::PathBuf;
+
+    fn inst(name: &str, language: &str) -> InstanceConfig {
+        InstanceConfig {
+            name: name.to_owned(),
+            kind: InstanceKind::Sonarr,
+            language: language.to_owned(),
+            url: "http://localhost".to_owned(),
+            api_key: "k".to_owned(),
+            storage_path: PathBuf::from("/storage").join(name),
+            library_path: PathBuf::from("/library").join(language),
+            link_strategy: LinkStrategy::Symlink,
+            propagate_delete: true,
+        }
+    }
+
+    #[test]
+    fn no_incumbent_links() {
+        let fr = inst("sonarr-fr", "fr");
+        assert_eq!(dedup_verdict(None, &fr, &fr), DedupVerdict::Link);
+    }
+
+    #[test]
+    fn an_instance_replaces_its_own_link() {
+        let en = inst("sonarr-en", "en");
+        // Same instance, even in a library whose language it does not speak.
+        let fr_lib = inst("sonarr-fr", "fr");
+        assert_eq!(
+            dedup_verdict(Some(&en), &en, &en),
+            DedupVerdict::Replace,
+            "upgrade / re-import"
+        );
+        assert_eq!(
+            dedup_verdict(Some(&en), &en, &fr_lib),
+            DedupVerdict::Replace
+        );
+    }
+
+    #[test]
+    fn native_language_source_beats_foreign_one() {
+        let fr = inst("sonarr-fr", "fr");
+        let en = inst("sonarr-en", "en");
+        // English library: the English instance's release evicts the fr MULTi.
+        assert_eq!(dedup_verdict(Some(&fr), &en, &en), DedupVerdict::Replace);
+        // ...and the reverse is skipped, so order does not matter.
+        assert_eq!(dedup_verdict(Some(&en), &fr, &en), DedupVerdict::Skip);
+    }
+
+    #[test]
+    fn ties_and_unresolvable_owners_keep_the_incumbent() {
+        let fr = inst("sonarr-fr", "fr");
+        let en = inst("sonarr-en", "en");
+        let other_fr = inst("sonarr-fr2", "fr");
+        // Both native -> incumbent stays.
+        assert_eq!(dedup_verdict(Some(&fr), &other_fr, &fr), DedupVerdict::Skip);
+        // Neither native (spanish library, say) -> incumbent stays.
+        let es_lib = inst("sonarr-es", "es");
+        assert_eq!(dedup_verdict(Some(&fr), &en, &es_lib), DedupVerdict::Skip);
+    }
+}

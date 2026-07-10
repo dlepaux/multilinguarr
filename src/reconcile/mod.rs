@@ -416,10 +416,50 @@ async fn apply_links<P: FfprobeProber>(
             is_multi_audio: spec.detection.is_multi_audio,
         };
 
+        // One file per SxxEyy per library, using the same keep-policy as the
+        // import handler. Without this a regenerate would resurrect every
+        // duplicate the handler resolved — and would silently undo a sweep.
+        let evict = match episode_conflict(mgr, ctx.all_instances, spec, target).await {
+            Conflict::Proceed(evict) => evict,
+            Conflict::Skip => {
+                metrics::counter!(
+                    crate::observability::names::DUPLICATE_LINK_SKIPPED,
+                    "instance" => target.name.clone(),
+                    "outcome" => "skipped",
+                )
+                .increment(1);
+                result.skipped += 1;
+                continue;
+            }
+            Conflict::Failed(e) => {
+                result
+                    .errors
+                    .push(format!("{}: dedup scan failed: {e}", target.name));
+                continue;
+            }
+        };
+
         if ctx.dry_run {
             result.actions.push(action);
             result.linked += 1;
             continue;
+        }
+
+        if let Some(existing) = evict {
+            if let Err(e) = mgr.unlink_absolute(&existing).await {
+                result.errors.push(format!(
+                    "{}: evict {} failed: {e}",
+                    target.name,
+                    existing.display()
+                ));
+                continue;
+            }
+            metrics::counter!(
+                crate::observability::names::DUPLICATE_LINK_SKIPPED,
+                "instance" => target.name.clone(),
+                "outcome" => "replaced",
+            )
+            .increment(1);
         }
 
         let link_result = if let Some(rel) = spec.relative_episode {
@@ -442,6 +482,64 @@ async fn apply_links<P: FfprobeProber>(
             }
         }
     }
+}
+
+/// Outcome of the per-library episode de-duplication check.
+enum Conflict {
+    /// Link may be created; `Some(path)` is an incumbent link to evict first.
+    Proceed(Option<PathBuf>),
+    /// An incumbent release wins this library — leave it alone.
+    Skip,
+    /// The scan itself failed; the caller records it and moves on.
+    Failed(String),
+}
+
+/// Apply `link::dedup_verdict` to a candidate episode link during the walk.
+/// Movies never conflict: their library entries are directory symlinks named
+/// `Title (Year)`, so an en/fr twin collides on name and cannot coexist.
+async fn episode_conflict(
+    mgr: &LinkManager,
+    all_instances: &[InstanceConfig],
+    spec: &LinkSpec<'_>,
+    target: &InstanceConfig,
+) -> Conflict {
+    let Some(rel) = spec.relative_episode else {
+        return Conflict::Proceed(None);
+    };
+    let Some((season, number)) = rel
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(crate::link::parse_season_episode)
+    else {
+        // No SxxEyy in the filename — nothing to key de-duplication on.
+        return Conflict::Proceed(None);
+    };
+
+    match mgr.find_conflicting_episode_link(rel, season, number).await {
+        Ok(None) => Conflict::Proceed(None),
+        Ok(Some(existing)) => {
+            let incumbent = owner_instance(all_instances, &existing).await;
+            match crate::link::dedup_verdict(incumbent, spec.source_instance, target) {
+                crate::link::DedupVerdict::Skip => Conflict::Skip,
+                crate::link::DedupVerdict::Replace => Conflict::Proceed(Some(existing)),
+                crate::link::DedupVerdict::Link => Conflict::Proceed(None),
+            }
+        }
+        Err(e) => Conflict::Failed(e.to_string()),
+    }
+}
+
+/// The instance whose storage backs `link`, or `None` when the link cannot be
+/// resolved (hardlink strategy, or a target outside every configured storage).
+/// Mirrors `handler::import::owner_instance` — both feed `link::dedup_verdict`.
+async fn owner_instance<'a>(
+    all_instances: &'a [InstanceConfig],
+    link: &Path,
+) -> Option<&'a InstanceConfig> {
+    let target = fs::read_link(link).await.ok()?;
+    all_instances
+        .iter()
+        .find(|i| target.starts_with(&i.storage_path))
 }
 
 /// Sort language keys for deterministic output.
@@ -700,6 +798,92 @@ mod tests {
         assert!(fs::try_exists(library.join("Liar 7.1 (2024)"))
             .await
             .unwrap());
+    }
+
+    /// A regenerate must CONVERGE each library to one link per `SxxEyy`, and the
+    /// survivor must not depend on the order storage happens to be walked.
+    /// Without this the admin regenerate endpoint resurrects every duplicate
+    /// the import handler resolved — and silently undoes a manual sweep.
+    /// Returns the `TempDir` alongside the paths: dropping it would delete the
+    /// tree before the caller can assert on it.
+    async fn run_dedup_regenerate(fr_first: bool) -> (TempDir, PathBuf, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let storage_fr = tmp.path().join("storage-fr");
+        let library_fr = tmp.path().join("library-fr");
+        let storage_en = tmp.path().join("storage-en");
+        let library_en = tmp.path().join("library-en");
+        for d in [&storage_fr, &library_fr, &storage_en, &library_en] {
+            fs::create_dir_all(d).await.unwrap();
+        }
+
+        // Two different releases of the SAME episode, one per instance.
+        let fr_season = storage_fr.join("Show").join("Season 01");
+        fs::create_dir_all(&fr_season).await.unwrap();
+        fs::write(fr_season.join("S01E01.MULTi-TyHD.mkv"), "multi")
+            .await
+            .unwrap();
+        let en_season = storage_en.join("Show").join("Season 01");
+        fs::create_dir_all(&en_season).await.unwrap();
+        fs::write(en_season.join("S01E01.EN-EDITH.mkv"), "english")
+            .await
+            .unwrap();
+
+        let inst_fr = make_instance(
+            "sonarr-fr",
+            InstanceKind::Sonarr,
+            "fr",
+            &storage_fr,
+            &library_fr,
+        );
+        let inst_en = make_instance(
+            "sonarr-en",
+            InstanceKind::Sonarr,
+            "en",
+            &storage_en,
+            &library_en,
+        );
+        let mgr_fr = LinkManager::from_instance(&inst_fr);
+        let mgr_en = LinkManager::from_instance(&inst_en);
+        let detector = LanguageDetector::new(en_fr_config(), StubFfprobe(multi_audio_streams()));
+
+        let instances = if fr_first {
+            vec![inst_fr.clone(), inst_en.clone()]
+        } else {
+            vec![inst_en.clone(), inst_fr.clone()]
+        };
+        let managers = vec![
+            (inst_fr.name.clone(), mgr_fr),
+            (inst_en.name.clone(), mgr_en),
+        ];
+
+        let result = regenerate_all(&instances, &detector, &managers, "fr", false).await;
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        (tmp, library_en, library_fr)
+    }
+
+    #[tokio::test]
+    async fn regenerate_dedupes_episode_links_regardless_of_walk_order() {
+        for fr_first in [true, false] {
+            let (_tmp, library_en, library_fr) = run_dedup_regenerate(fr_first).await;
+
+            let en_native = library_en.join("Show/Season 01/S01E01.EN-EDITH.mkv");
+            let en_multi = library_en.join("Show/Season 01/S01E01.MULTi-TyHD.mkv");
+            assert!(
+                fs::try_exists(&en_native).await.unwrap(),
+                "fr_first={fr_first}: english library must keep the native release"
+            );
+            assert!(
+                !fs::try_exists(&en_multi).await.unwrap(),
+                "fr_first={fr_first}: regenerate must not resurrect the duplicate"
+            );
+
+            // The French library is served by the only fr-capable file.
+            assert!(
+                fs::try_exists(library_fr.join("Show/Season 01/S01E01.MULTi-TyHD.mkv"))
+                    .await
+                    .unwrap()
+            );
+        }
     }
 
     #[tokio::test]

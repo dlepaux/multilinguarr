@@ -393,6 +393,53 @@ impl LinkManager {
 // Free helpers
 // ---------------------------------------------------------------------
 
+/// What to do with an incoming episode link when another release already
+/// claims the same `SxxEyy` in the target library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DedupVerdict {
+    /// No conflict, or the incoming release wins: create the link.
+    Link,
+    /// The incumbent wins: leave the library untouched.
+    Skip,
+    /// The incoming release wins: evict the incumbent, then link.
+    Replace,
+}
+
+/// Decide which of two releases of the same episode may occupy `target`'s
+/// library. `incumbent` is the instance whose storage backs the link already
+/// present, or `None` when there is no conflict (or its owner is unresolvable).
+///
+/// The rules, in order:
+/// 1. An instance always replaces its **own** link — an upgrade or re-import,
+///    not a cross-instance duplicate.
+/// 2. A release whose source instance speaks the library's language beats one
+///    that does not; that is the native-audio copy.
+/// 3. Otherwise the incumbent stays, so the surviving link never depends on
+///    the order files happen to be imported or walked.
+///
+/// Shared by the import handler and the reconcile walk so a `regenerate` can
+/// never resurrect a duplicate the handler just resolved.
+#[must_use]
+pub fn dedup_verdict(
+    incumbent: Option<&InstanceConfig>,
+    source: &InstanceConfig,
+    target: &InstanceConfig,
+) -> DedupVerdict {
+    let Some(incumbent) = incumbent else {
+        return DedupVerdict::Link;
+    };
+    if incumbent.name == source.name {
+        return DedupVerdict::Replace;
+    }
+    if incumbent.language == target.language {
+        return DedupVerdict::Skip;
+    }
+    if source.language == target.language {
+        return DedupVerdict::Replace;
+    }
+    DedupVerdict::Skip
+}
+
 /// Extract a `SxxEyy` season/episode marker from a release filename.
 ///
 /// Deliberately hand-rolled rather than pulling in `regex`: the grammar is
