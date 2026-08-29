@@ -22,7 +22,7 @@ COPY migrations/ migrations/
 RUN cargo build --release --locked --bin multilinguarr
 
 # Stage 4: Runtime — minimal Alpine with ffmpeg
-FROM alpine:3.21
+FROM alpine:3.24
 
 ARG VERSION=dev
 ARG GIT_SHA=unknown
