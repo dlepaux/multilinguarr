@@ -1,3 +1,11 @@
+## [1.2.3](https://github.com/dlepaux/multilinguarr/compare/v1.2.2...v1.2.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **deps:** update event-listener to 5.4.2 for RUSTSEC-2026-0221 ([562e4f8](https://github.com/dlepaux/multilinguarr/commit/562e4f8ddae70e83feea4cbfc20b4bc17ed94620))
+* **deps:** update rustls, h2, chacha20 and spin for open advisories ([f63d152](https://github.com/dlepaux/multilinguarr/commit/f63d1522cdfda4d3059dfb4b47c7237bb9103bfd))
+
 ## [1.2.2](https://github.com/dlepaux/multilinguarr/compare/v1.2.1...v1.2.2) (2026-07-10)
 
 
