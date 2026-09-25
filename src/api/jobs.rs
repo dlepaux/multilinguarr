@@ -147,7 +147,7 @@ pub async fn retry(
     path = "/api/v1/jobs/reprocess",
     tag = "admin",
     responses(
-        (status = 200, description = "All terminal jobs reset to pending"),
+        (status = 200, description = "Failed and dead-letter jobs reset to pending; completed jobs are never replayed"),
     ),
     security(("api_key" = []))
 )]

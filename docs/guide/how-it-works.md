@@ -44,7 +44,7 @@ Every webhook becomes a row in the SQLite `jobs` table. This gives:
 - **Crash recovery** — if the container restarts mid-processing, pending jobs resume
 - **Retry with backoff** — transient failures (network, filesystem) are retried automatically
 - **Audit trail** — every event is recorded with its payload, status, and any errors
-- **Reprocessing** — `POST /api/v1/jobs/reprocess` replays all historical events
+- **Reprocessing** — `POST /api/v1/jobs/reprocess` re-queues every failed and dead-letter job. Completed jobs are never replayed, because the table also holds past deletes and a replayed delete cascades to the sibling instance. To re-run one completed job, use `POST /api/v1/jobs/{id}/retry`.
 
 ## Cross-instance propagation
 

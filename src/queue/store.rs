@@ -426,8 +426,12 @@ impl JobStore {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Reset ALL `completed/failed/dead_letter` jobs to `pending`.
+    /// Reset every `failed` and `dead_letter` job to `pending`.
     /// Returns the number of jobs requeued.
+    ///
+    /// Completed jobs are never replayed: the table keeps every historical
+    /// webhook, and a replayed `*_delete` cascades to the sibling instance.
+    /// Use [`Self::retry_job`] to re-run one completed job on purpose.
     ///
     /// # Errors
     ///
@@ -437,7 +441,7 @@ impl JobStore {
         let result = sqlx::query(
             "UPDATE jobs SET status = 'pending', attempts = 0, \
              next_attempt_at = ?, last_error = NULL, updated_at = ? \
-             WHERE status IN ('completed', 'failed', 'dead_letter')",
+             WHERE status IN ('failed', 'dead_letter')",
         )
         .bind(&now)
         .bind(&now)

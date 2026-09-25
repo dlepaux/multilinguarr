@@ -189,6 +189,53 @@ async fn ack_failure_permanent_marks_failed() {
     assert_eq!(job.status_typed().unwrap(), JobStatus::Failed);
 }
 
+// ---------- reprocess_all ----------
+
+/// The table keeps every historical webhook, `*_delete` events included, and a
+/// replayed delete cascades to the sibling instance. Replaying completed rows
+/// is therefore destructive; only the failed ones may go back to the queue.
+#[tokio::test]
+async fn reprocess_all_requeues_failed_and_dead_letter_but_never_completed() {
+    let store = make_store().await;
+    let mut ids = Vec::new();
+    for value in 0..3 {
+        ids.push(
+            store
+                .enqueue(&TestPayload { value }, 5, now())
+                .await
+                .unwrap(),
+        );
+        store.claim_next("w", TimeDelta::seconds(60)).await.unwrap();
+    }
+    store.ack_success(ids[0]).await.unwrap();
+    store
+        .ack_failure(ids[1], "401", FailureDisposition::PermanentFailure)
+        .await
+        .unwrap();
+    store
+        .ack_failure(ids[2], "exhausted", FailureDisposition::DeadLetter)
+        .await
+        .unwrap();
+    let completed_before = store.get(ids[0]).await.unwrap().unwrap();
+
+    let requeued = store.reprocess_all().await.unwrap();
+
+    assert_eq!(requeued, 2, "only the failed and dead-letter rows");
+    let completed_after = store.get(ids[0]).await.unwrap().unwrap();
+    assert_eq!(
+        completed_after.status_typed().unwrap(),
+        JobStatus::Completed
+    );
+    assert_eq!(
+        completed_after.updated_at, completed_before.updated_at,
+        "a completed row must not be touched at all"
+    );
+    for id in &ids[1..] {
+        let job = store.get(*id).await.unwrap().unwrap();
+        assert_eq!(job.status_typed().unwrap(), JobStatus::Pending);
+    }
+}
+
 // ---------- sweeper / startup recovery ----------
 
 #[tokio::test]
