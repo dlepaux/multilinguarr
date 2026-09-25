@@ -1,3 +1,16 @@
+# [1.3.0](https://github.com/dlepaux/multilinguarr/compare/v1.2.4...v1.3.0) (2026-09-25)
+
+
+### Bug Fixes
+
+* **link:** weigh a same-named link from the other instance, and link every library ([a4ea342](https://github.com/dlepaux/multilinguarr/commit/a4ea3424d5d213309441890f23e691bc05d5e93a))
+* **queue:** reprocess never replays completed jobs ([bc5496f](https://github.com/dlepaux/multilinguarr/commit/bc5496f2694dcacea1da05886793b58530876088))
+
+
+### Features
+
+* **observability:** count permanent handler failures by kind ([eafcefd](https://github.com/dlepaux/multilinguarr/commit/eafcefd232d3f88ae7969a413207a7028f12b0e7))
+
 ## [1.2.4](https://github.com/dlepaux/multilinguarr/compare/v1.2.3...v1.2.4) (2026-09-25)
 
 
