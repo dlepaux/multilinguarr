@@ -1752,6 +1752,25 @@ fn unknown_instance_is_permanent() {
     assert!(!err.is_transient());
 }
 
+/// Each library is linked on its own. If one failed permanently and another
+/// only transiently, reporting the permanent one would drop the retry that
+/// could still link the second library.
+#[test]
+fn a_job_with_one_transient_target_failure_is_retried() {
+    let permanent = HandlerError::Link(crate::link::LinkError::AlreadyExists {
+        from: PathBuf::new(),
+        target: PathBuf::new(),
+    });
+    let transient = HandlerError::Link(crate::link::LinkError::Io {
+        path: PathBuf::new(),
+        source: std::io::Error::other("busy"),
+    });
+
+    let err = super::import::job_error(vec![permanent, transient]).unwrap_err();
+
+    assert!(err.is_transient(), "{err}");
+}
+
 // =====================================================================
 // Language-driven linking + per-library episode de-duplication
 //
@@ -2045,5 +2064,180 @@ async fn sonarr_upgrade_replaces_this_instances_own_link_even_when_renamed() {
             .await
             .unwrap(),
         "an instance must replace its own stale link, not leave a duplicate"
+    );
+}
+
+// =====================================================================
+// Two instances, one filename (MED-16)
+//
+// A ManualImport `copy` hardlinks one instance's download into the other's
+// storage, so both import the same release under the same name. The English
+// library then already holds that exact filename, linked to the other copy.
+// =====================================================================
+
+/// Production order: `ConfigRepo` loads instances `ORDER BY name`, so the
+/// English instance is linked first. The rig declares French first.
+fn en_first(mut cfg: Config) -> Config {
+    cfg.instances.reverse();
+    cfg
+}
+
+const MULTI_NAME: &str = "Show.Multi.S01E01.mkv";
+
+async fn import_episode(
+    instance: &crate::config::InstanceConfig,
+    series: &Path,
+    file: &Path,
+    cfg: Config,
+) -> Result<(), HandlerError> {
+    let event = sonarr_download_event_named(
+        series.to_str().unwrap(),
+        file.to_str().unwrap(),
+        &format!("Season 01/{MULTI_NAME}"),
+    );
+    handle_sonarr_download(instance, &event, &Rig::registry(cfg, multi_audio_streams())).await
+}
+
+/// Poldark S01, jobs 2857–2864: the French link was never made.
+#[tokio::test]
+async fn sonarr_primary_keeps_the_alternates_same_named_link_and_links_french() {
+    let rig = Rig::new().await;
+    let alt_series = rig.alt_storage.join("Show");
+    let en_copy = write_named_episode(&alt_series, MULTI_NAME, "multi").await;
+    let cfg = en_first(rig.config_sonarr());
+    import_episode(&cfg.instances[0].clone(), &alt_series, &en_copy, cfg)
+        .await
+        .unwrap();
+
+    let fr_series = rig.primary_storage.join("Show");
+    fs::create_dir_all(fr_series.join("Season 01"))
+        .await
+        .unwrap();
+    let fr_copy = fr_series.join("Season 01").join(MULTI_NAME);
+    fs::hard_link(&en_copy, &fr_copy).await.unwrap();
+    let cfg = en_first(rig.config_sonarr());
+    import_episode(&cfg.instances[1].clone(), &fr_series, &fr_copy, cfg)
+        .await
+        .unwrap();
+
+    let entry = PathBuf::from("Show/Season 01").join(MULTI_NAME);
+    assert_eq!(
+        fs::read_link(rig.alt_library.join(&entry)).await.unwrap(),
+        en_copy,
+        "the English library keeps its native instance's copy"
+    );
+    assert_eq!(
+        fs::read_link(rig.primary_library.join(&entry))
+            .await
+            .unwrap(),
+        fr_copy,
+        "the French library gets its link"
+    );
+}
+
+/// The mirror order: the French primary linked the file into both libraries
+/// first, then the English instance imports its own copy under the same name.
+#[tokio::test]
+async fn sonarr_alternate_native_copy_replaces_the_primarys_same_named_link() {
+    let rig = Rig::new().await;
+    let fr_series = rig.primary_storage.join("Show");
+    let fr_copy = write_named_episode(&fr_series, MULTI_NAME, "multi").await;
+    let cfg = en_first(rig.config_sonarr());
+    import_episode(&cfg.instances[1].clone(), &fr_series, &fr_copy, cfg)
+        .await
+        .unwrap();
+
+    let alt_series = rig.alt_storage.join("Show");
+    fs::create_dir_all(alt_series.join("Season 01"))
+        .await
+        .unwrap();
+    let en_copy = alt_series.join("Season 01").join(MULTI_NAME);
+    fs::hard_link(&fr_copy, &en_copy).await.unwrap();
+    let cfg = en_first(rig.config_sonarr());
+    import_episode(&cfg.instances[0].clone(), &alt_series, &en_copy, cfg)
+        .await
+        .unwrap();
+
+    let entry = PathBuf::from("Show/Season 01").join(MULTI_NAME);
+    assert_eq!(
+        fs::read_link(rig.alt_library.join(&entry)).await.unwrap(),
+        en_copy,
+        "the native instance's copy wins its own library"
+    );
+    assert_eq!(
+        fs::read_link(rig.primary_library.join(&entry))
+            .await
+            .unwrap(),
+        fr_copy,
+        "the French library is untouched"
+    );
+}
+
+/// Something multilinguarr cannot identify, a plain file rather than a link,
+/// already holds the English name. English fails, and French must still link.
+#[tokio::test]
+async fn sonarr_primary_links_every_library_even_when_one_target_fails() {
+    let rig = Rig::new().await;
+    let blocker = rig.alt_library.join("Show/Season 01").join(MULTI_NAME);
+    fs::create_dir_all(blocker.parent().unwrap()).await.unwrap();
+    fs::write(&blocker, "not ours").await.unwrap();
+
+    let fr_series = rig.primary_storage.join("Show");
+    let fr_copy = write_named_episode(&fr_series, MULTI_NAME, "multi").await;
+    let cfg = en_first(rig.config_sonarr());
+    let err = import_episode(&cfg.instances[1].clone(), &fr_series, &fr_copy, cfg)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            HandlerError::Link(crate::link::LinkError::AlreadyExists { .. })
+        ),
+        "the job still fails, so it is counted and alerted: {err}"
+    );
+    assert!(
+        fs::try_exists(rig.primary_library.join("Show/Season 01").join(MULTI_NAME))
+            .await
+            .unwrap(),
+        "the French link is made even though English failed first"
+    );
+    assert_eq!(
+        fs::read_to_string(&blocker).await.unwrap(),
+        "not ours",
+        "an entry multilinguarr cannot identify is never removed"
+    );
+}
+
+#[tokio::test]
+async fn radarr_primary_links_every_library_even_when_one_target_fails() {
+    let rig = Rig::new().await;
+    // A real directory, not a link, already holds the English folder name.
+    fs::create_dir_all(rig.alt_library.join("Movie (2024)"))
+        .await
+        .unwrap();
+
+    let folder = rig.primary_storage.join("Movie (2024)");
+    write_movie_file(&folder, "multi").await;
+    let cfg = en_first(rig.config_radarr());
+    let primary = cfg.instances[1].clone();
+    let file_path = folder.join("movie.mkv");
+    let event = radarr_download_event(folder.to_str().unwrap(), file_path.to_str().unwrap());
+    let err = handle_radarr_download(&primary, &event, &Rig::registry(cfg, multi_audio_streams()))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            HandlerError::Link(crate::link::LinkError::AlreadyExists { .. })
+        ),
+        "{err}"
+    );
+    assert!(
+        fs::try_exists(rig.primary_library.join("Movie (2024)/movie.mkv"))
+            .await
+            .unwrap(),
+        "the French link is made even though English failed first"
     );
 }

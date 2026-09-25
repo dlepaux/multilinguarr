@@ -565,6 +565,91 @@ async fn symlink_refuses_to_overwrite_unrelated_target() {
 }
 
 // ---------------------------------------------------------------------
+// find_conflicting_episode_link — an entry at the exact name
+// ---------------------------------------------------------------------
+
+const EPISODE: &str = "Show/Season 1/Show.Multi.S01E01.mkv";
+
+/// The other instance imported the same release first, so the library already
+/// holds this exact filename, linked to that instance's copy (Poldark S01).
+#[tokio::test]
+async fn conflict_scan_reports_a_same_named_link_to_another_source() {
+    let sandbox = Sandbox::new().await;
+    let source = sandbox.storage.join(EPISODE);
+    write_file(&source, "multi").await;
+    let other_copy = sandbox.storage.join("other-instance").join(EPISODE);
+    write_file(&other_copy, "multi").await;
+    let entry = sandbox.library.join(EPISODE);
+    fs::create_dir_all(entry.parent().unwrap()).await.unwrap();
+    fs::symlink(&other_copy, &entry).await.unwrap();
+
+    let manager = sandbox.manager(InstanceKind::Sonarr, LinkStrategy::Symlink);
+    let conflict = manager
+        .find_conflicting_episode_link(&source, Path::new(EPISODE), 1, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(conflict, Some(entry));
+}
+
+/// A re-import of the same file must stay a no-op, not a conflict with itself.
+#[tokio::test]
+async fn conflict_scan_ignores_the_same_named_link_to_this_source() {
+    let sandbox = Sandbox::new().await;
+    let source = sandbox.storage.join(EPISODE);
+    write_file(&source, "multi").await;
+    let manager = sandbox.manager(InstanceKind::Sonarr, LinkStrategy::Symlink);
+    manager
+        .link_episode_from(&source, Path::new(EPISODE))
+        .await
+        .unwrap();
+
+    let conflict = manager
+        .find_conflicting_episode_link(&source, Path::new(EPISODE), 1, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(conflict, None);
+}
+
+/// Under the hardlink strategy the library entry has no link target to read,
+/// so "already this link" means the same inode.
+#[tokio::test]
+async fn hardlink_conflict_scan_ignores_the_same_inode() {
+    let sandbox = Sandbox::new().await;
+    let source = sandbox.storage.join(EPISODE);
+    write_file(&source, "multi").await;
+    let entry = sandbox.library.join(EPISODE);
+    fs::create_dir_all(entry.parent().unwrap()).await.unwrap();
+    fs::hard_link(&source, &entry).await.unwrap();
+
+    let manager = sandbox.manager(InstanceKind::Sonarr, LinkStrategy::Hardlink);
+    let conflict = manager
+        .find_conflicting_episode_link(&source, Path::new(EPISODE), 1, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(conflict, None);
+}
+
+#[tokio::test]
+async fn hardlink_conflict_scan_reports_a_different_file_under_the_same_name() {
+    let sandbox = Sandbox::new().await;
+    let source = sandbox.storage.join(EPISODE);
+    write_file(&source, "multi").await;
+    let entry = sandbox.library.join(EPISODE);
+    write_file(&entry, "another release").await;
+
+    let manager = sandbox.manager(InstanceKind::Sonarr, LinkStrategy::Hardlink);
+    let conflict = manager
+        .find_conflicting_episode_link(&source, Path::new(EPISODE), 1, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(conflict, Some(entry));
+}
+
+// ---------------------------------------------------------------------
 // SxxEyy marker parsing — the de-dup key for episode links.
 // ---------------------------------------------------------------------
 

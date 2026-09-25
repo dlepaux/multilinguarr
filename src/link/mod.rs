@@ -305,6 +305,11 @@ impl LinkManager {
     /// convention. Matching is done on the `SxxEyy` marker rather than on the
     /// filename, since two releases of one episode share nothing else.
     ///
+    /// An entry at the exact target name counts too, unless it already is
+    /// this link to `source`. Two instances import the same release under the
+    /// same name whenever one hardlinks the other's download, and that entry
+    /// would otherwise block the link as [`LinkError::AlreadyExists`].
+    ///
     /// Returns `None` when the season folder does not exist yet, or when no
     /// other file claims `(season, episode)`.
     ///
@@ -314,6 +319,7 @@ impl LinkManager {
     /// - [`LinkError::Io`] on filesystem failure.
     pub async fn find_conflicting_episode_link(
         &self,
+        source: &Path,
         relative: &Path,
         season: u32,
         episode: u32,
@@ -321,6 +327,12 @@ impl LinkManager {
         reject_unsafe_relative(relative)?;
 
         let target = self.library_root.join(relative);
+        // Checked first: an entry at the exact name blocks the link outright.
+        // A stat error other than "absent" resurfaces when the link is made.
+        if fs::symlink_metadata(&target).await.is_ok() && !self.is_link_to(&target, source).await? {
+            return Ok(Some(target));
+        }
+
         let Some(season_dir) = target.parent() else {
             return Ok(None);
         };
@@ -348,6 +360,27 @@ impl LinkManager {
             }
         }
         Ok(None)
+    }
+
+    /// Whether the existing entry at `entry` already is this manager's link to
+    /// `source`: a symlink naming it, or under the hardlink strategy the same
+    /// inode.
+    async fn is_link_to(&self, entry: &Path, source: &Path) -> Result<bool, LinkError> {
+        match self.strategy {
+            LinkStrategy::Symlink => {
+                let meta = fs::symlink_metadata(entry)
+                    .await
+                    .map_err(|e| LinkError::from_io(entry.to_path_buf(), e))?;
+                if !meta.file_type().is_symlink() {
+                    return Ok(false);
+                }
+                let target = fs::read_link(entry)
+                    .await
+                    .map_err(|e| LinkError::from_io(entry.to_path_buf(), e))?;
+                Ok(target == source)
+            }
+            LinkStrategy::Hardlink => same_inode(source, entry).await,
+        }
     }
 
     /// Remove a link by absolute path. Used by the de-duplication path to

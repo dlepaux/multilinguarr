@@ -515,7 +515,10 @@ async fn episode_conflict(
         return Conflict::Proceed(None);
     };
 
-    match mgr.find_conflicting_episode_link(rel, season, number).await {
+    match mgr
+        .find_conflicting_episode_link(spec.source_path, rel, season, number)
+        .await
+    {
         Ok(None) => Conflict::Proceed(None),
         Ok(Some(existing)) => {
             let incumbent = owner_instance(all_instances, &existing).await;
@@ -882,6 +885,75 @@ mod tests {
                 fs::try_exists(library_fr.join("Show/Season 01/S01E01.MULTi-TyHD.mkv"))
                     .await
                     .unwrap()
+            );
+        }
+    }
+
+    /// The same release in both storages under one name, as a ManualImport
+    /// `copy` leaves it (MED-16). The walk must converge in either order, each
+    /// library served by its native instance's copy, instead of failing on the
+    /// name the other instance linked first.
+    #[tokio::test]
+    async fn regenerate_converges_when_both_instances_hold_the_same_filename() {
+        let episode = Path::new("Show/Season 01/Show.Multi.S01E01.mkv");
+        for fr_first in [true, false] {
+            let tmp = TempDir::new().unwrap();
+            let [storage_fr, library_fr, storage_en, library_en] =
+                ["storage-fr", "library-fr", "storage-en", "library-en"]
+                    .map(|d| tmp.path().join(d));
+            let fr_copy = storage_fr.join(episode);
+            let en_copy = storage_en.join(episode);
+            for d in [&library_fr, &library_en] {
+                fs::create_dir_all(d).await.unwrap();
+            }
+            for copy in [&fr_copy, &en_copy] {
+                fs::create_dir_all(copy.parent().unwrap()).await.unwrap();
+            }
+            fs::write(&fr_copy, "multi").await.unwrap();
+            fs::hard_link(&fr_copy, &en_copy).await.unwrap();
+
+            let inst_fr = make_instance(
+                "sonarr-fr",
+                InstanceKind::Sonarr,
+                "fr",
+                &storage_fr,
+                &library_fr,
+            );
+            let inst_en = make_instance(
+                "sonarr-en",
+                InstanceKind::Sonarr,
+                "en",
+                &storage_en,
+                &library_en,
+            );
+            let managers = vec![
+                (inst_fr.name.clone(), LinkManager::from_instance(&inst_fr)),
+                (inst_en.name.clone(), LinkManager::from_instance(&inst_en)),
+            ];
+            let instances = if fr_first {
+                vec![inst_fr, inst_en]
+            } else {
+                vec![inst_en, inst_fr]
+            };
+            let detector =
+                LanguageDetector::new(en_fr_config(), StubFfprobe(multi_audio_streams()));
+
+            let result = regenerate_all(&instances, &detector, &managers, "fr", false).await;
+
+            assert!(
+                result.errors.is_empty(),
+                "fr_first={fr_first}: {:?}",
+                result.errors
+            );
+            assert_eq!(
+                fs::read_link(library_en.join(episode)).await.unwrap(),
+                en_copy,
+                "fr_first={fr_first}: english keeps its native copy"
+            );
+            assert_eq!(
+                fs::read_link(library_fr.join(episode)).await.unwrap(),
+                fr_copy,
+                "fr_first={fr_first}"
             );
         }
     }

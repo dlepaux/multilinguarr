@@ -165,11 +165,36 @@ async fn link_radarr_primary<P: FfprobeProber>(
     source_path: &Path,
     folder_name: &str,
 ) -> Result<(), HandlerError> {
+    let mut failures = Vec::new();
     for target in primary_link_targets(registry, primary, detection, InstanceKind::Radarr) {
-        let mgr = registry.link_manager(&target.name)?;
-        link_movie_with_log(mgr, source_path, folder_name, &target.name).await?;
+        let linked = async {
+            let mgr = registry.link_manager(&target.name)?;
+            link_movie_with_log(mgr, source_path, folder_name, &target.name).await
+        }
+        .await;
+        if let Err(e) = linked {
+            warn!(target = %target.name, error = %e, "link failed — still linking the other libraries");
+            failures.push(e);
+        }
     }
-    Ok(())
+    job_error(failures)
+}
+
+/// The error a job reports once every target library was attempted, so one
+/// library's failure never costs another its link. A transient failure wins
+/// over a permanent one: the retry is what can still link that library, and
+/// the targets already linked are idempotent on the way back.
+pub(super) fn job_error(failures: Vec<HandlerError>) -> Result<(), HandlerError> {
+    failures
+        .into_iter()
+        .reduce(|kept, next| {
+            if !kept.is_transient() && next.is_transient() {
+                next
+            } else {
+                kept
+            }
+        })
+        .map_or(Ok(()), Err)
 }
 
 /// Libraries that should receive a link for a file the *primary* imported.
@@ -457,8 +482,9 @@ async fn link_sonarr_primary<P: FfprobeProber>(
     relative_path: &Path,
     episode: Option<(u32, u32)>,
 ) -> Result<(), HandlerError> {
+    let mut failures = Vec::new();
     for target in primary_link_targets(registry, primary, detection, InstanceKind::Sonarr) {
-        link_episode_deduped(
+        let linked = link_episode_deduped(
             registry,
             primary,
             target,
@@ -466,9 +492,13 @@ async fn link_sonarr_primary<P: FfprobeProber>(
             relative_path,
             episode,
         )
-        .await?;
+        .await;
+        if let Err(e) = linked {
+            warn!(target = %target.name, error = %e, "link failed — still linking the other libraries");
+            failures.push(e);
+        }
     }
-    Ok(())
+    job_error(failures)
 }
 
 /// Link one episode into `target`, enforcing **one file per `SxxEyy` per
@@ -497,7 +527,7 @@ async fn link_episode_deduped<P: FfprobeProber>(
 
     if let Some((season, number)) = episode {
         if let Some(existing) = mgr
-            .find_conflicting_episode_link(relative_path, season, number)
+            .find_conflicting_episode_link(source_path, relative_path, season, number)
             .await?
         {
             let incumbent = owner_instance(registry, &existing).await;
