@@ -430,6 +430,7 @@ async fn radarr_primary_multi_audio_links_into_both_libraries() {
 #[tokio::test]
 async fn radarr_primary_single_language_links_only_primary_library() {
     let rig = Rig::new().await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
     let folder = rig.primary_storage.join("FR Only (2024)");
     write_movie_file(&folder, "fr-video").await;
 
@@ -568,6 +569,77 @@ async fn sonarr_primary_single_language_links_only_primary_library() {
     assert!(!fs::try_exists(rig.alt_library.join("Show")).await.unwrap());
 }
 
+/// `mount_sonarr_source_series` with the series' original language set, as the
+/// *arr's language id (fr = 2, en = 1 in `config_sonarr`).
+async fn mount_sonarr_source_series_original(
+    server: &MockServer,
+    api_key: &str,
+    original_language_id: u32,
+) {
+    Mock::given(method("GET"))
+        .and(path("/api/v3/series"))
+        .and(query_param("tvdbId", "81189"))
+        .and(header("X-Api-Key", api_key))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "id": 7,
+            "title": "Show",
+            "tvdbId": 81189,
+            "qualityProfileId": 7,
+            "seasonFolder": true,
+            "monitored": true,
+            "seasons": [{ "seasonNumber": 1, "monitored": true }],
+            "originalLanguage": { "id": original_language_id, "name": "set by the test" }
+        }])))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn sonarr_primary_language_original_is_not_cross_added() {
+    // MED-17 (2026-09-25): a French-original series lives in the French library
+    // only, so the alternate is never asked to add it.
+    let rig = Rig::new().await;
+    let series_dir = rig.primary_storage.join("Show");
+    write_episode_file(&series_dir, "fr-only").await;
+    mount_sonarr_source_series_original(&rig.primary_server, "k1", 2).await;
+
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    let episode_path = series_dir.join("Season 01/S01E01.mkv");
+    let event = sonarr_download_event(series_dir.to_str().unwrap(), episode_path.to_str().unwrap());
+    let registry = Rig::registry(cfg, fr_only_streams());
+
+    handle_sonarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    let rel = "Show/Season 01/S01E01.mkv";
+    assert!(fs::try_exists(rig.primary_library.join(rel)).await.unwrap());
+    assert!(rig.alt_server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sonarr_primary_foreign_original_still_cross_adds() {
+    let rig = Rig::new().await;
+    let series_dir = rig.primary_storage.join("Show");
+    write_episode_file(&series_dir, "fr-only").await;
+    mount_sonarr_source_series_original(&rig.primary_server, "k1", 1).await;
+    mount_sonarr_lookup_empty(&rig.alt_server, "k2").await;
+    mount_sonarr_quality_root_and_add(&rig.alt_server).await;
+
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    let episode_path = series_dir.join("Season 01/S01E01.mkv");
+    let event = sonarr_download_event(series_dir.to_str().unwrap(), episode_path.to_str().unwrap());
+    let registry = Rig::registry(cfg, fr_only_streams());
+
+    handle_sonarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    assert!(posted_to(&rig.alt_server, "/api/v3/series").await);
+}
+
 #[tokio::test]
 async fn sonarr_alternate_multi_audio_links_alternate_only() {
     let rig = Rig::new().await;
@@ -660,6 +732,7 @@ async fn radarr_is_upgrade_unlinks_then_relinks_for_primary_multi() {
 #[tokio::test]
 async fn radarr_undetermined_language_assumes_instance_language_and_propagates() {
     let rig = Rig::new().await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
     let folder = rig.primary_storage.join("Mystery (2024)");
     write_movie_file(&folder, "??").await;
 
@@ -727,6 +800,7 @@ async fn unknown_instance_in_payload_is_permanent_error() {
 #[tokio::test]
 async fn process_dispatches_radarr_download_via_jobprocessor() {
     let rig = Rig::new().await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
     let folder = rig.primary_storage.join("Dispatch (2024)");
     write_movie_file(&folder, "v").await;
 
@@ -871,6 +945,7 @@ async fn radarr_primary_movie_delete_unlinks_both_libraries_and_propagates() {
 #[tokio::test]
 async fn radarr_movie_delete_skipped_when_deleted_files_false() {
     let rig = Rig::new().await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
     let folder = rig.primary_storage.join("Stays (2024)");
     write_movie_file(&folder, "v").await;
 
@@ -1004,12 +1079,45 @@ async fn storage_aware_alternate_link_to_foreign_storage_is_preserved_on_alt_del
 
 // ----- cross_instance::propagate_add_movie via primary single-language import -----
 
+/// The source instance's own record for tmdbId 42, carrying the title's original
+/// language as the *arr's language id (fr = 2, en = 1 in `config_radarr`).
+async fn mount_radarr_source_movie(server: &MockServer, api_key: &str, original_language_id: u32) {
+    let body = json!([{
+        "id": 1,
+        "title": "Test Movie",
+        "year": 2024,
+        "tmdbId": 42,
+        "qualityProfileId": 1,
+        "hasFile": true,
+        "originalLanguage": { "id": original_language_id, "name": "set by the test" }
+    }]);
+    Mock::given(method("GET"))
+        .and(path("/api/v3/movie"))
+        .and(query_param("tmdbId", "42"))
+        .and(header("X-Api-Key", api_key))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(server)
+        .await;
+}
+
+async fn posted_to(server: &MockServer, api_path: &str) -> bool {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.method.as_str() == "POST" && r.url.path() == api_path)
+}
+
 #[tokio::test]
 async fn radarr_primary_single_language_propagates_add_to_alternate() {
     let rig = Rig::new().await;
     let folder = rig.primary_storage.join("FR Solo (2024)");
     write_movie_file(&folder, "fr-only").await;
 
+    // An English-original film imported with French audio only: the alternate
+    // needs its own English copy.
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
     // Alternate has no copy yet — dedup check returns empty array.
     mount_radarr_lookup_empty(&rig.alt_server, "k2").await;
     mount_radarr_quality_and_root(&rig.alt_server).await;
@@ -1034,13 +1142,41 @@ async fn radarr_primary_single_language_propagates_add_to_alternate() {
     assert!(!fs::try_exists(rig.alt_library.join("FR Solo (2024)"))
         .await
         .unwrap());
-    // Test passes if all the alt-server mocks were satisfied
-    // (wiremock will fail the test on missing matches at drop time).
+    assert!(posted_to(&rig.alt_server, "/api/v3/movie").await);
+}
+
+#[tokio::test]
+async fn radarr_primary_language_original_is_not_cross_added() {
+    // A French original has no English release to fetch. Decision of record
+    // (MED-17, 2026-09-25): French originals live in the French library only,
+    // so the alternate is never asked to add one.
+    let rig = Rig::new().await;
+    let folder = rig.primary_storage.join("Le Film (2024)");
+    write_movie_file(&folder, "fr-only").await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 2).await;
+
+    let cfg = rig.config_radarr();
+    let primary = cfg.instances[0].clone();
+    let file_path = folder.join("movie.mkv");
+    let event = radarr_download_event(folder.to_str().unwrap(), file_path.to_str().unwrap());
+    let registry = Rig::registry(cfg, fr_only_streams());
+
+    handle_radarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    assert!(
+        fs::try_exists(rig.primary_library.join("Le Film (2024)/movie.mkv"))
+            .await
+            .unwrap()
+    );
+    assert!(rig.alt_server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn radarr_primary_single_language_skips_add_when_target_already_has_movie() {
     let rig = Rig::new().await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
     let folder = rig.primary_storage.join("Already (2024)");
     write_movie_file(&folder, "v").await;
 
@@ -1234,6 +1370,7 @@ fn radarr_movie_file_delete_event(folder_path: &str) -> RadarrMovieFileDelete {
 #[tokio::test]
 async fn radarr_movie_file_delete_unlinks_primary_without_propagation() {
     let rig = Rig::new().await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
     let folder = rig.primary_storage.join("Deleted (2024)");
     write_movie_file(&folder, "content").await;
 
@@ -1327,6 +1464,7 @@ async fn sonarr_episode_file_delete_from_alternate_only_removes_alt_link() {
 #[tokio::test]
 async fn symlink_target_points_to_correct_storage() {
     let rig = Rig::new().await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
     let folder = rig.primary_storage.join("Verified (2024)");
     write_movie_file(&folder, "content").await;
 
@@ -1363,6 +1501,7 @@ async fn symlink_target_points_to_correct_storage() {
 #[tokio::test]
 async fn radarr_fallback_no_language_tags_increments_counter() {
     let rig = Rig::new().await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
     let folder = rig.primary_storage.join("Untagged (2024)");
     write_movie_file(&folder, "??").await;
 
@@ -1437,6 +1576,7 @@ async fn sonarr_fallback_no_language_tags_increments_counter() {
 #[tokio::test]
 async fn radarr_import_no_base_audio_track_increments_counter_observe_only() {
     let rig = Rig::new().await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
     let folder = rig.primary_storage.join("Liar 7.1 (2024)");
     write_movie_file(&folder, "fr-71-only").await;
 

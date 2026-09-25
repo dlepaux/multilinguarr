@@ -17,7 +17,7 @@ use super::error::HandlerError;
 use super::registry::HandlerRegistry;
 use crate::client::{
     AddMovieOptions, AddMovieRequest, AddOutcome, AddSeriesOptions, AddSeriesRequest, ArrClient,
-    SeasonInfo,
+    Language, SeasonInfo,
 };
 use crate::config::{InstanceConfig, InstanceKind};
 use crate::detection::FfprobeProber;
@@ -28,6 +28,7 @@ use crate::webhook::{RadarrMovieRef, SonarrSeriesRef};
 // bounded.
 const OUTCOME_CREATED: &str = "created";
 const OUTCOME_ALREADY_EXISTED: &str = "already_existed";
+const OUTCOME_SKIPPED_ORIGINAL: &str = "skipped_original_language";
 const OUTCOME_ERROR: &str = "error";
 
 fn record_add_outcome(source: &str, target: &str, outcome: &'static str) {
@@ -38,6 +39,45 @@ fn record_add_outcome(source: &str, target: &str, outcome: &'static str) {
         "outcome" => outcome,
     )
     .increment(1);
+}
+
+/// True when the title's original language is `instance`'s own. An unknown
+/// original language (a record without one) keeps the cross-add.
+fn is_own_language_original<P: FfprobeProber>(
+    registry: &HandlerRegistry<P>,
+    instance: &InstanceConfig,
+    original: Option<&Language>,
+) -> bool {
+    let Some(original) = original else {
+        return false;
+    };
+    let Some(own) = registry
+        .config
+        .languages
+        .definitions
+        .get(&instance.language)
+    else {
+        return false;
+    };
+    let own_id = match instance.kind {
+        InstanceKind::Radarr => own.radarr_id,
+        InstanceKind::Sonarr => own.sonarr_id,
+    };
+    original.id == own_id
+}
+
+/// Decision of record (MED-17, 2026-09-25): a title whose original language is
+/// the source's own lives in the source's library only. Its siblings have no
+/// dub of it to fetch, so a cross-add would sit "missing" forever.
+fn skip_own_language_original(source: &InstanceConfig, targets: &[&InstanceConfig], title: &str) {
+    info!(
+        source = %source.name,
+        title,
+        "original language is the source's own — skipping cross-instance add"
+    );
+    for target in targets {
+        record_add_outcome(&source.name, &target.name, OUTCOME_SKIPPED_ORIGINAL);
+    }
 }
 
 // =====================================================================
@@ -67,6 +107,21 @@ pub async fn propagate_add_movie<P: FfprobeProber>(
                 && !detected_languages.contains(&i.language)
         })
         .collect();
+
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let ArrClient::Radarr(source_radarr) = registry.client(&source_instance.name)? else {
+        return Ok(());
+    };
+    let original = source_radarr
+        .get_movie_by_tmdb_id(movie_ref.tmdb_id)
+        .await?
+        .and_then(|movie| movie.original_language);
+    if is_own_language_original(registry, source_instance, original.as_ref()) {
+        skip_own_language_original(source_instance, &targets, &movie_ref.title);
+        return Ok(());
+    }
 
     for target in targets {
         let target_client = registry.client(&target.name)?;
@@ -142,27 +197,29 @@ pub async fn propagate_add_movie<P: FfprobeProber>(
     Ok(())
 }
 
-async fn fetch_source_seasons(
+/// The source series' seasons (to copy their monitoring) and original language.
+async fn fetch_source_series(
     source_sonarr: &crate::client::SonarrClient,
     source_name: &str,
     tvdb_id: u32,
-) -> Result<Vec<SeasonInfo>, HandlerError> {
+) -> Result<(Vec<SeasonInfo>, Option<Language>), HandlerError> {
     if let Some(series) = source_sonarr.get_series_by_tvdb_id(tvdb_id).await? {
-        Ok(series
+        let seasons = series
             .seasons
             .into_iter()
             .map(|s| SeasonInfo {
                 season_number: s.season_number,
                 monitored: s.monitored,
             })
-            .collect())
+            .collect();
+        Ok((seasons, series.original_language))
     } else {
         warn!(
             source = %source_name,
             tvdb_id,
             "could not get series details from source — adding with empty seasons"
         );
-        Ok(vec![])
+        Ok((vec![], None))
     }
 }
 
@@ -273,8 +330,12 @@ pub async fn propagate_add_series<P: FfprobeProber>(
     let ArrClient::Sonarr(source_sonarr) = source_client else {
         return Ok(());
     };
-    let seasons =
-        fetch_source_seasons(source_sonarr, &source_instance.name, series_ref.tvdb_id).await?;
+    let (seasons, original) =
+        fetch_source_series(source_sonarr, &source_instance.name, series_ref.tvdb_id).await?;
+    if is_own_language_original(registry, source_instance, original.as_ref()) {
+        skip_own_language_original(source_instance, &targets, &series_ref.title);
+        return Ok(());
+    }
 
     for target in targets {
         let target_client = registry.client(&target.name)?;

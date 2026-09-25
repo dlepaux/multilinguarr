@@ -55,6 +55,9 @@ pub struct SonarrSeries {
     pub monitored: bool,
     #[serde(default)]
     pub seasons: Vec<SeasonInfo>,
+    /// The series' original language, in this Sonarr's language ids.
+    #[serde(default)]
+    pub original_language: Option<Language>,
 }
 
 /// Payload for `POST /api/v3/series`.

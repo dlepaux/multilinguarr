@@ -43,6 +43,9 @@ pub struct RadarrMovie {
     pub has_file: bool,
     #[serde(default)]
     pub movie_file: Option<MovieFile>,
+    /// The title's original language, in this Radarr's language ids.
+    #[serde(default)]
+    pub original_language: Option<Language>,
 }
 
 /// Payload for `POST /api/v3/movie`.

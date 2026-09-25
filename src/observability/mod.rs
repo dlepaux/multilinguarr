@@ -148,7 +148,7 @@ fn describe_all() {
     // Counters — declared for stories 01/02/04/05
     metrics::describe_counter!(
         names::CROSS_INSTANCE_ADD,
-        "Cross-instance add outcomes (created/already_existed/error)."
+        "Cross-instance add outcomes (created/already_existed/skipped_original_language/error)."
     );
     metrics::describe_counter!(
         names::WEBHOOK_UNKNOWN_EVENT,
