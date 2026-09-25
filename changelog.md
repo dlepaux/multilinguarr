@@ -1,3 +1,10 @@
+## [1.2.4](https://github.com/dlepaux/multilinguarr/compare/v1.2.3...v1.2.4) (2026-09-25)
+
+
+### Bug Fixes
+
+* **cross-instance:** never cross-add a title whose original language is the source's own ([756e022](https://github.com/dlepaux/multilinguarr/commit/756e0227f3985c6ad03a083eaf606db871f36bd0))
+
 ## [1.2.3](https://github.com/dlepaux/multilinguarr/compare/v1.2.2...v1.2.3) (2026-09-15)
 
 
