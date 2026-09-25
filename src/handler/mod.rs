@@ -9,5 +9,5 @@ mod registry;
 #[cfg(test)]
 mod tests;
 
-pub use error::HandlerError;
+pub use error::{register_failure_counters, HandlerError};
 pub use registry::HandlerRegistry;

@@ -794,6 +794,133 @@ async fn unknown_instance_in_payload_is_permanent_error() {
 }
 
 // =====================================================================
+// Handler failure counter (MED-16): the alertable signal for a job that
+// will never be retried. Before it, those failures lived only in logs.
+// =====================================================================
+
+async fn stored_job<P: JobPayload>(payload: &P) -> crate::queue::Job {
+    let store = JobStore::new(Database::in_memory().await.unwrap());
+    let id = store.enqueue(payload, 5, Utc::now()).await.unwrap();
+    store.get(id).await.unwrap().unwrap()
+}
+
+/// Run one job through the processor under a local recorder; return the
+/// outcome and what `/metrics` would render.
+async fn process_recording(
+    registry: &HandlerRegistry<StubFfprobe>,
+    job: crate::queue::Job,
+) -> (ProcessOutcome, String) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let guard = metrics::set_default_local_recorder(&recorder);
+    let outcome = registry.process(job).await;
+    drop(guard);
+    (outcome, handle.render())
+}
+
+#[tokio::test]
+async fn permanent_failure_is_counted_by_error_kind() {
+    let rig = Rig::new().await;
+    let folder = rig.primary_storage.join("Ghost (2024)");
+    let registry = Rig::registry(rig.config_radarr(), multi_audio_streams());
+    let job = stored_job(&RadarrWebhookJob {
+        instance: "ghost".to_owned(),
+        event: RadarrEvent::Download(radarr_download_event(
+            folder.to_str().unwrap(),
+            folder.join("movie.mkv").to_str().unwrap(),
+        )),
+    })
+    .await;
+
+    let (outcome, render) = process_recording(&registry, job).await;
+
+    assert!(matches!(outcome, ProcessOutcome::Permanent(_)));
+    assert!(
+        render.contains("multilinguarr_handler_failures_total{kind=\"unknown_instance\"} 1"),
+        "{render}"
+    );
+}
+
+/// A transient failure is retried, so counting it would page on every retry
+/// of a job that goes on to succeed. Exhausted retries are the dead-letter
+/// gauge's to report.
+#[tokio::test]
+async fn transient_failure_is_not_counted_as_a_handler_failure() {
+    let rig = Rig::new().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/movie"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&rig.primary_server)
+        .await;
+    let folder = rig.primary_storage.join("Flaky (2024)");
+    write_movie_file(&folder, "v").await;
+    let registry = Rig::registry(rig.config_radarr(), fr_only_streams());
+    let job = stored_job(&RadarrWebhookJob {
+        instance: "radarr-fr".to_owned(),
+        event: RadarrEvent::Download(radarr_download_event(
+            folder.to_str().unwrap(),
+            folder.join("movie.mkv").to_str().unwrap(),
+        )),
+    })
+    .await;
+
+    let (outcome, render) = process_recording(&registry, job).await;
+
+    assert!(
+        matches!(outcome, ProcessOutcome::Transient(_)),
+        "{outcome:?}"
+    );
+    assert!(
+        !render.contains("multilinguarr_handler_failures_total"),
+        "{render}"
+    );
+}
+
+/// A counter series does not exist until its first increment, and
+/// `increase()` cannot see a series appear already at 1. Without this the
+/// first failure after every restart would never page.
+#[test]
+fn every_failure_kind_is_exported_at_zero_before_the_first_failure() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, super::register_failure_counters);
+    let render = handle.render();
+
+    for kind in HandlerError::KINDS {
+        assert!(
+            render.contains(&format!(
+                "multilinguarr_handler_failures_total{{kind=\"{kind}\"}} 0"
+            )),
+            "{kind} missing in:\n{render}"
+        );
+    }
+}
+
+/// `KINDS` is what gets exported at zero, so it must name exactly the kinds
+/// `kind()` can return.
+#[test]
+fn failure_kinds_name_every_handler_error_variant() {
+    let one_of_each = [
+        HandlerError::Arr(crate::client::ArrError::NotFound {
+            instance: String::new(),
+            endpoint: String::new(),
+        }),
+        HandlerError::Link(crate::link::LinkError::NotFound(PathBuf::new())),
+        HandlerError::Detection(DetectionError::FfprobeUnavailable),
+        HandlerError::UnknownInstance(String::new()),
+        HandlerError::MissingField("movie"),
+        HandlerError::MalformedPath(PathBuf::new()),
+        HandlerError::Decode(serde_json::from_str::<u8>("x").unwrap_err()),
+        HandlerError::Queue(crate::queue::QueueError::UnknownKind(String::new())),
+    ];
+
+    let kinds: std::collections::HashSet<&str> =
+        one_of_each.iter().map(HandlerError::kind).collect();
+
+    assert_eq!(kinds, std::collections::HashSet::from(HandlerError::KINDS));
+}
+
+// =====================================================================
 // JobProcessor dispatch round-trip
 // =====================================================================
 

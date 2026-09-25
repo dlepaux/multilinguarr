@@ -41,6 +41,35 @@ pub enum HandlerError {
 }
 
 impl HandlerError {
+    /// Every value [`Self::kind`] returns.
+    pub const KINDS: [&'static str; 8] = [
+        "arr",
+        "link",
+        "detection",
+        "unknown_instance",
+        "missing_field",
+        "malformed_path",
+        "decode",
+        "queue",
+    ];
+
+    /// The `kind` label of the handler failure counter: one value per
+    /// variant, so the label stays bounded. The job's `last_error` holds the
+    /// detail.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Arr(_) => "arr",
+            Self::Link(_) => "link",
+            Self::Detection(_) => "detection",
+            Self::UnknownInstance(_) => "unknown_instance",
+            Self::MissingField(_) => "missing_field",
+            Self::MalformedPath(_) => "malformed_path",
+            Self::Decode(_) => "decode",
+            Self::Queue(_) => "queue",
+        }
+    }
+
     /// `true` when retrying the job has any chance of succeeding.
     ///
     /// - `Arr` errors defer to `ArrError::is_transient` (5xx, timeout,
@@ -62,5 +91,16 @@ impl HandlerError {
             | Self::Decode(_)
             | Self::Queue(_) => false,
         }
+    }
+}
+
+/// Export every failure kind at zero. A counter series exists only after its
+/// first increment, and `increase()` cannot see a series that first appears
+/// at 1, so without this the first failure after each restart would never
+/// page. Call once, after the metrics recorder is installed.
+pub fn register_failure_counters() {
+    for kind in HandlerError::KINDS {
+        metrics::counter!(crate::observability::names::HANDLER_FAILURES, "kind" => kind)
+            .increment(0);
     }
 }

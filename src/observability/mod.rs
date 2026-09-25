@@ -58,6 +58,10 @@ pub mod names {
     /// the same `SxxEyy` in that library, or an existing link was evicted in
     /// favour of a native-language release. `outcome` is `skipped` | `replaced`.
     pub const DUPLICATE_LINK_SKIPPED: &str = "multilinguarr_duplicate_link_skipped_total";
+    /// Counter — jobs a handler failed permanently, so they are never retried.
+    /// `kind` is [`crate::handler::HandlerError::kind`]. Exported at zero from
+    /// startup by [`crate::handler::register_failure_counters`].
+    pub const HANDLER_FAILURES: &str = "multilinguarr_handler_failures_total";
 }
 
 /// DLQ gauge polling interval.
@@ -125,6 +129,10 @@ fn describe_all() {
     metrics::describe_counter!(
         names::LINKS_CREATED,
         "Physical link operations performed (excludes idempotent no-ops)."
+    );
+    metrics::describe_counter!(
+        names::HANDLER_FAILURES,
+        "Jobs a handler failed permanently (never retried), by error kind."
     );
 
     // Histograms — currently emitted

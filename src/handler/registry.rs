@@ -232,6 +232,10 @@ impl<P: FfprobeProber> JobProcessor for HandlerRegistry<P> {
                     ProcessOutcome::Transient(msg)
                 } else {
                     tracing::error!(error = %msg, "handler returned permanent error — will not retry");
+                    metrics::counter!(crate::observability::names::HANDLER_FAILURES,
+                        "kind" => err.kind(),
+                    )
+                    .increment(1);
                     ProcessOutcome::Permanent(msg)
                 }
             }
