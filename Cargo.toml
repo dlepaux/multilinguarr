@@ -52,7 +52,7 @@ utoipa-axum = "0.2"
 [dev-dependencies]
 assert_fs = "1"
 tempfile = "3"
-testcontainers = "0.27"
+testcontainers = "0.28"
 tower = "0.5"
 tracing-test = "0.2"
 wiremock = "0.6"
