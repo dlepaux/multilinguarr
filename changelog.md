@@ -1,3 +1,10 @@
+## [1.3.3](https://github.com/dlepaux/multilinguarr/compare/v1.3.2...v1.3.3) (2026-10-04)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate utoipa-axum to 0.3 ([#29](https://github.com/dlepaux/multilinguarr/issues/29)) ([ebc3bfd](https://github.com/dlepaux/multilinguarr/commit/ebc3bfd910b18e139679168fa3a352bcbbaa21d5))
+
 ## [1.3.2](https://github.com/dlepaux/multilinguarr/compare/v1.3.1...v1.3.2) (2026-10-04)
 
 
