@@ -1,3 +1,10 @@
+## [1.3.1](https://github.com/dlepaux/multilinguarr/compare/v1.3.0...v1.3.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate metrics-exporter-prometheus to 0.18 ([#26](https://github.com/dlepaux/multilinguarr/issues/26)) ([0573669](https://github.com/dlepaux/multilinguarr/commit/0573669ac373519f8f4b77836444b400ba2be417))
+
 # [1.3.0](https://github.com/dlepaux/multilinguarr/compare/v1.2.4...v1.3.0) (2026-09-25)
 
 
