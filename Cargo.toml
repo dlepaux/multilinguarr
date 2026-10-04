@@ -47,7 +47,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 utoipa = { version = "5", features = ["axum_extras"] }
-utoipa-axum = "0.2"
+utoipa-axum = "0.3"
 
 [dev-dependencies]
 assert_fs = "1"
