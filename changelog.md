@@ -1,3 +1,10 @@
+## [1.3.2](https://github.com/dlepaux/multilinguarr/compare/v1.3.1...v1.3.2) (2026-10-04)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate tower-http to 0.7 ([#28](https://github.com/dlepaux/multilinguarr/issues/28)) ([686cf5c](https://github.com/dlepaux/multilinguarr/commit/686cf5c5749d25fdf6d632974c4871dc9f18df22))
+
 ## [1.3.1](https://github.com/dlepaux/multilinguarr/compare/v1.3.0...v1.3.1) (2026-10-04)
 
 
