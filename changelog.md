@@ -1,3 +1,10 @@
+## [1.3.4](https://github.com/dlepaux/multilinguarr/compare/v1.3.3...v1.3.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* **deps:** rustls 0.23.46 for RUSTSEC-2026-0346 to 0349 ([8a0c487](https://github.com/dlepaux/multilinguarr/commit/8a0c4877d53c51d1c11feda94336bee641314d5e))
+
 ## [1.3.3](https://github.com/dlepaux/multilinguarr/compare/v1.3.2...v1.3.3) (2026-10-04)
 
 
