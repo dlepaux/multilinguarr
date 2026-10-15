@@ -173,12 +173,12 @@ impl Rig {
 struct StubFfprobe(Vec<AudioStream>);
 
 impl FfprobeProber for StubFfprobe {
-    async fn probe(
+    fn probe(
         &self,
         _path: &Path,
         _timeout: std::time::Duration,
-    ) -> Result<Vec<AudioStream>, DetectionError> {
-        Ok(self.0.clone())
+    ) -> impl std::future::Future<Output = Result<Vec<AudioStream>, DetectionError>> + Send {
+        std::future::ready(Ok(self.0.clone()))
     }
 }
 
