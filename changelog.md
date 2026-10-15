@@ -1,3 +1,10 @@
+## [1.3.5](https://github.com/dlepaux/multilinguarr/compare/v1.3.4...v1.3.5) (2026-10-15)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate utoipa to v6 ([#40](https://github.com/dlepaux/multilinguarr/issues/40)) ([24bd2b1](https://github.com/dlepaux/multilinguarr/commit/24bd2b194a70623fb5550124375f953ccdb70c12))
+
 ## [1.3.4](https://github.com/dlepaux/multilinguarr/compare/v1.3.3...v1.3.4) (2026-10-14)
 
 
