@@ -59,15 +59,15 @@ impl StubFfprobe {
 }
 
 impl FfprobeProber for StubFfprobe {
-    async fn probe(
+    fn probe(
         &self,
         _path: &Path,
         _timeout: Duration,
-    ) -> Result<Vec<AudioStream>, DetectionError> {
-        match &self.response {
+    ) -> impl std::future::Future<Output = Result<Vec<AudioStream>, DetectionError>> + Send {
+        std::future::ready(match &self.response {
             Ok(v) => Ok(v.clone()),
             Err(_) => Err(DetectionError::FfprobeUnavailable),
-        }
+        })
     }
 }
 

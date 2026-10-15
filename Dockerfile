@@ -1,5 +1,5 @@
 # Stage 1: Chef — pre-built cargo-chef for dependency layer caching
-FROM lukemathwalker/cargo-chef:latest-rust-1.88-alpine AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.99-alpine AS chef
 RUN apk add --no-cache musl-dev
 WORKDIR /app
 
