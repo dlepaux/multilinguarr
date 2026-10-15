@@ -1,3 +1,10 @@
+## [1.3.6](https://github.com/dlepaux/multilinguarr/compare/v1.3.5...v1.3.6) (2026-10-15)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate sqlx to 0.9 ([#27](https://github.com/dlepaux/multilinguarr/issues/27)) ([8eb5ff5](https://github.com/dlepaux/multilinguarr/commit/8eb5ff57c70d699f4acb884414332d961f823bfe))
+
 ## [1.3.5](https://github.com/dlepaux/multilinguarr/compare/v1.3.4...v1.3.5) (2026-10-15)
 
 
