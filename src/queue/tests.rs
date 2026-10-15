@@ -359,8 +359,8 @@ impl CountingProcessor {
 }
 
 impl JobProcessor for CountingProcessor {
-    async fn process(&self, _job: Job) -> ProcessOutcome {
-        match &self.behaviour {
+    fn process(&self, _job: Job) -> impl std::future::Future<Output = ProcessOutcome> + Send {
+        std::future::ready(match &self.behaviour {
             Behaviour::AlwaysSuccess => {
                 self.success.fetch_add(1, Ordering::SeqCst);
                 ProcessOutcome::Success
@@ -383,7 +383,7 @@ impl JobProcessor for CountingProcessor {
                     ProcessOutcome::Success
                 }
             }
-        }
+        })
     }
 }
 

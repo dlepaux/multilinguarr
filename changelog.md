@@ -1,3 +1,31 @@
+## [1.3.5](https://github.com/dlepaux/multilinguarr/compare/v1.3.4...v1.3.5) (2026-10-15)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate utoipa to v6 ([#40](https://github.com/dlepaux/multilinguarr/issues/40)) ([24bd2b1](https://github.com/dlepaux/multilinguarr/commit/24bd2b194a70623fb5550124375f953ccdb70c12))
+
+## [1.3.4](https://github.com/dlepaux/multilinguarr/compare/v1.3.3...v1.3.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* **deps:** rustls 0.23.46 for RUSTSEC-2026-0346 to 0349 ([8a0c487](https://github.com/dlepaux/multilinguarr/commit/8a0c4877d53c51d1c11feda94336bee641314d5e))
+
+## [1.3.3](https://github.com/dlepaux/multilinguarr/compare/v1.3.2...v1.3.3) (2026-10-04)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate utoipa-axum to 0.3 ([#29](https://github.com/dlepaux/multilinguarr/issues/29)) ([ebc3bfd](https://github.com/dlepaux/multilinguarr/commit/ebc3bfd910b18e139679168fa3a352bcbbaa21d5))
+
+## [1.3.2](https://github.com/dlepaux/multilinguarr/compare/v1.3.1...v1.3.2) (2026-10-04)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate tower-http to 0.7 ([#28](https://github.com/dlepaux/multilinguarr/issues/28)) ([686cf5c](https://github.com/dlepaux/multilinguarr/commit/686cf5c5749d25fdf6d632974c4871dc9f18df22))
+
 ## [1.3.1](https://github.com/dlepaux/multilinguarr/compare/v1.3.0...v1.3.1) (2026-10-04)
 
 

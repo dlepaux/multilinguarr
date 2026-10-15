@@ -1,8 +1,8 @@
 [package]
 name = "multilinguarr"
-version = "1.3.1"
+version = "1.3.5"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.99"
 description = "Enforces multi-language audio in the *arr media stack via symlinks/hardlinks and Jellyfin library routing"
 license = "MIT"
 repository = "https://github.com/dlepaux/multilinguarr"
@@ -42,12 +42,12 @@ subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util", "fs", "signal"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
-tower-http = { version = "0.6", features = ["trace", "timeout", "limit"] }
+tower-http = { version = "0.7", features = ["trace", "timeout", "limit"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-utoipa = { version = "5", features = ["axum_extras"] }
-utoipa-axum = "0.2"
+utoipa = { version = "6", features = ["axum_extras"] }
+utoipa-axum = "0.3"
 
 [dev-dependencies]
 assert_fs = "1"
