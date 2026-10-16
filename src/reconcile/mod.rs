@@ -589,12 +589,13 @@ mod tests {
     struct StubFfprobe(Vec<AudioStream>);
 
     impl FfprobeProber for StubFfprobe {
-        async fn probe(
+        fn probe(
             &self,
             _path: &Path,
             _timeout: Duration,
-        ) -> Result<Vec<AudioStream>, DetectionError> {
-            Ok(self.0.clone())
+        ) -> impl std::future::Future<Output = Result<Vec<AudioStream>, DetectionError>> + Send
+        {
+            std::future::ready(Ok(self.0.clone()))
         }
     }
 
@@ -691,7 +692,7 @@ mod tests {
         let detector = LanguageDetector::new(en_fr_config(), StubFfprobe(fr_only_streams()));
 
         let result = regenerate_all(
-            &[inst.clone()],
+            std::slice::from_ref(&inst),
             &detector,
             &[(inst.name.clone(), mgr)],
             "fr",
@@ -731,7 +732,7 @@ mod tests {
         let detector = LanguageDetector::new(en_fr_config(), StubFfprobe(fr_only_streams()));
 
         let result = regenerate_all(
-            &[inst.clone()],
+            std::slice::from_ref(&inst),
             &detector,
             &[(inst.name.clone(), mgr)],
             "fr",
@@ -742,7 +743,7 @@ mod tests {
         assert_eq!(result.scanned, 1);
         assert_eq!(result.linked, 1);
         assert!(!result.dry_run);
-        assert!(result.errors.is_empty());
+        assert_eq!(result.errors, Vec::<String>::new());
 
         // Symlink created.
         let link = library.join("Test Movie (2024)");
@@ -780,7 +781,7 @@ mod tests {
         let recorder_guard = metrics::set_default_local_recorder(&recorder);
 
         let result = regenerate_all(
-            &[inst.clone()],
+            std::slice::from_ref(&inst),
             &detector,
             &[(inst.name.clone(), mgr)],
             "fr",
@@ -889,7 +890,7 @@ mod tests {
         }
     }
 
-    /// The same release in both storages under one name, as a ManualImport
+    /// The same release in both storages under one name, as a `ManualImport`
     /// `copy` leaves it (MED-16). The walk must converge in either order, each
     /// library served by its native instance's copy, instead of failing on the
     /// name the other instance linked first.
@@ -1003,7 +1004,7 @@ mod tests {
 
         assert_eq!(result.scanned, 1);
         assert_eq!(result.linked, 2);
-        assert!(result.errors.is_empty());
+        assert_eq!(result.errors, Vec::<String>::new());
         assert!(fs::try_exists(library_fr.join("Multi (2024)"))
             .await
             .unwrap());
@@ -1032,7 +1033,7 @@ mod tests {
         let detector = LanguageDetector::new(en_fr_config(), StubFfprobe(fr_only_streams()));
 
         let result = regenerate_all(
-            &[inst.clone()],
+            std::slice::from_ref(&inst),
             &detector,
             &[(inst.name.clone(), mgr)],
             "fr",

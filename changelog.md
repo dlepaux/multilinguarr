@@ -1,3 +1,24 @@
+## [1.3.6](https://github.com/dlepaux/multilinguarr/compare/v1.3.5...v1.3.6) (2026-10-15)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate sqlx to 0.9 ([#27](https://github.com/dlepaux/multilinguarr/issues/27)) ([8eb5ff5](https://github.com/dlepaux/multilinguarr/commit/8eb5ff57c70d699f4acb884414332d961f823bfe))
+
+## [1.3.5](https://github.com/dlepaux/multilinguarr/compare/v1.3.4...v1.3.5) (2026-10-15)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate utoipa to v6 ([#40](https://github.com/dlepaux/multilinguarr/issues/40)) ([24bd2b1](https://github.com/dlepaux/multilinguarr/commit/24bd2b194a70623fb5550124375f953ccdb70c12))
+
+## [1.3.4](https://github.com/dlepaux/multilinguarr/compare/v1.3.3...v1.3.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* **deps:** rustls 0.23.46 for RUSTSEC-2026-0346 to 0349 ([8a0c487](https://github.com/dlepaux/multilinguarr/commit/8a0c4877d53c51d1c11feda94336bee641314d5e))
+
 ## [1.3.3](https://github.com/dlepaux/multilinguarr/compare/v1.3.2...v1.3.3) (2026-10-04)
 
 
