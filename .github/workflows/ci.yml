@@ -22,12 +22,12 @@ jobs:
       RUSTFLAGS: "-D warnings"
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88.0"
+          toolchain: "1.99.1"
           components: rustfmt,clippy
 
       - name: Cache cargo registry + build
@@ -65,12 +65,12 @@ jobs:
       RUSTFLAGS: "-D warnings"
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88.0"
+          toolchain: "1.99.1"
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
@@ -83,7 +83,7 @@ jobs:
 
       - name: Cache test fixtures
         id: cache-fixtures
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: tests/media
           key: fixtures-${{ hashFiles('scripts/generate-fixtures.sh') }}
@@ -180,7 +180,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -188,7 +188,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - name: Install deps
@@ -234,7 +234,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout release commit
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: main
 

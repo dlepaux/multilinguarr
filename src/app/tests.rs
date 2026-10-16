@@ -300,7 +300,7 @@ async fn jobs_api_shows_enqueued_webhook() {
     let (status, body) = http("GET", &format!("{base}/api/v1/jobs"), None).await;
     assert_eq!(status, 200);
     let jobs = body.as_array().unwrap();
-    assert!(!jobs.is_empty());
+    assert!(!jobs.is_empty(), "no jobs enqueued");
     assert_eq!(jobs[0]["kind"], "radarr_webhook");
 
     cancel.cancel();
