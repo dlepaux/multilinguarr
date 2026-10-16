@@ -98,7 +98,10 @@ async fn schema_endpoints_need_no_auth() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
-    assert!(!body.get("fields").unwrap().as_array().unwrap().is_empty());
+    assert!(
+        !body.get("fields").unwrap().as_array().unwrap().is_empty(),
+        "{body}"
+    );
 }
 
 // =====================================================================
@@ -452,7 +455,7 @@ async fn setup_status_shows_missing_items() {
         .unwrap();
     let body = response_json(resp).await;
     assert_eq!(body["complete"], false);
-    assert!(!body["missing"].as_array().unwrap().is_empty());
+    assert!(!body["missing"].as_array().unwrap().is_empty(), "{body}");
 }
 
 #[tokio::test]
