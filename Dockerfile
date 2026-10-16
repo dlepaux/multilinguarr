@@ -1,5 +1,7 @@
 # Stage 1: Chef — pre-built cargo-chef for dependency layer caching
-FROM lukemathwalker/cargo-chef:latest-rust-1.99-alpine AS chef
+# The base tag and rust-toolchain.toml move together (Renovate group "rust
+# toolchain"): the image builds with this tag's compiler, CI with the pin.
+FROM lukemathwalker/cargo-chef:latest-rust-1.99.1-alpine AS chef
 RUN apk add --no-cache musl-dev
 WORKDIR /app
 

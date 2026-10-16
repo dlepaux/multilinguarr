@@ -1,9 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended",
-    "schedule:weekends"
-  ],
+  "extends": ["config:recommended", "schedule:weekends"],
   "labels": ["dependencies"],
   "packageRules": [
     {
@@ -15,6 +12,27 @@
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": true
+    },
+    {
+      "description": "The cargo-chef base (the image's compiler) and rust-toolchain.toml (CI's) are one decision. Renovate's native rust-toolchain manager bumped the pin alone, automerged, while the base tag was untracked (HL-348). Not automerged: PR CI never builds the image, so green on the PR proves nothing about the base.",
+      "groupName": "rust toolchain",
+      "matchDepNames": ["rust"],
+      "minimumReleaseAge": "7 days",
+      "automerge": false
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "Tracks the Dockerfile's lukemathwalker/cargo-chef:latest-rust-X.Y.Z-alpine tag, which the dockerfile manager cannot version, under depName rust so the group moves it with rust-toolchain.toml (HL-348).",
+      "customType": "regex",
+      "managerFilePatterns": ["/^Dockerfile$/"],
+      "matchStrings": [
+        "lukemathwalker/cargo-chef:(?<currentValue>latest-rust-\\d+\\.\\d+\\.\\d+-alpine)"
+      ],
+      "depNameTemplate": "rust",
+      "packageNameTemplate": "lukemathwalker/cargo-chef",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "regex:^latest-rust-(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-alpine$"
     }
   ]
 }
