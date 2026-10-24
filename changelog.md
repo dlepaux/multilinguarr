@@ -1,3 +1,10 @@
+## [1.3.7](https://github.com/dlepaux/multilinguarr/compare/v1.3.6...v1.3.7) (2026-10-24)
+
+
+### Bug Fixes
+
+* **deps:** bump rustls-webpki, webpki-root-certs and ctutils (RUSTSEC-2026-0382/0383/0385) ([#46](https://github.com/dlepaux/multilinguarr/issues/46)) ([5daf357](https://github.com/dlepaux/multilinguarr/commit/5daf3577891b721bd8647ba06c516a41daa2a32c))
+
 ## [1.3.6](https://github.com/dlepaux/multilinguarr/compare/v1.3.5...v1.3.6) (2026-10-15)
 
 
