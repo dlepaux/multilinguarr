@@ -39,6 +39,38 @@ fn source_label(kind: InstanceKind) -> &'static str {
     }
 }
 
+/// Export the HEVC header counter at zero for every configured instance,
+/// so the first bad import after a restart is an `increase()`.
+pub fn register_hevc_header_counters(instances: &[InstanceConfig]) {
+    for instance in instances {
+        metrics::counter!(
+            crate::observability::names::HEVC_EMPTY_HEADER,
+            "instance" => instance.name.clone(),
+        )
+        .increment(0);
+    }
+}
+
+/// Observe-only, like the audio gate: the file still links, because it
+/// plays fine everywhere except players that need the parameter sets up
+/// front. The counter tells the operator to repair or replace it.
+fn observe_hevc_header(instance: &InstanceConfig, file: &Path, detection: &DetectionResult) {
+    if !detection.has_empty_hevc_header() {
+        return;
+    }
+    metrics::counter!(
+        crate::observability::names::HEVC_EMPTY_HEADER,
+        "instance" => instance.name.clone(),
+    )
+    .increment(1);
+    warn!(
+        file = %file.display(),
+        instance = %instance.name,
+        header_bytes = ?detection.hevc_header_bytes,
+        "HEVC header carries no parameter sets — cannot direct-play on Apple TV"
+    );
+}
+
 // =====================================================================
 // Radarr
 // =====================================================================
@@ -114,6 +146,7 @@ pub async fn handle_radarr_download<P: FfprobeProber>(
             is_multi_audio = detection.is_multi_audio,
             "language detection complete",
         );
+        observe_hevc_header(instance, file, &detection);
 
         // Audio-truth gate (deliberately observe-only — see
         // plan/decisions/audio-gate-stays-observe-only.md). The counter is the
@@ -374,6 +407,7 @@ pub async fn handle_sonarr_download<P: FfprobeProber>(
             is_multi_audio = detection.is_multi_audio,
             "language detection complete",
         );
+        observe_hevc_header(instance, file, &detection);
 
         // Audio-truth gate (deliberately observe-only — see
         // plan/decisions/audio-gate-stays-observe-only.md). The counter is the

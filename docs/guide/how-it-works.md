@@ -30,6 +30,7 @@ description: Learn how multilinguarr processes Radarr/Sonarr webhooks, probes au
 2. **Job enqueued** — the webhook payload is stored in SQLite and acknowledged immediately (200 OK with job ID)
 3. **Worker claims job** — a background worker picks up the job from the queue
 4. **ffprobe detection** — the handler runs ffprobe on the file path from the webhook payload to detect audio languages
+   - The same probe reads the HEVC video header. A header with no parameter sets plays in most players but not where they are needed up front (Jellyfin direct play on Apple TV). Such a file still links; `multilinguarr_hevc_empty_header_total{instance}` counts it so the operator can repair or replace it.
 5. **Link decision** — based on detected languages and the instance config:
    - **Multi-audio** (e.g., FR + EN): symlinks created in both FR and EN libraries
    - **Single language**: symlink created in the matching library only
