@@ -285,12 +285,9 @@ impl LinkManager {
         }
         let target = self.library_root.join(relative);
         match fs::symlink_metadata(&target).await {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                let link_target = fs::read_link(&target)
-                    .await
-                    .map_err(|e| LinkError::from_io(target.clone(), e))?;
-                Ok(link_target.starts_with(foreign_storage_root))
-            }
+            Ok(meta) if meta.file_type().is_symlink() => Ok(link_target(&target)
+                .await?
+                .starts_with(foreign_storage_root)),
             Ok(meta) if meta.is_dir() => {
                 first_symlink_resolves_into(&target, foreign_storage_root).await
             }
@@ -749,10 +746,32 @@ async fn first_symlink_resolves_into(dir: &Path, foreign_root: &Path) -> Result<
 
 /// Whether the symlink at `link` points under one of `roots`.
 async fn link_points_into(link: &Path, roots: &[PathBuf]) -> Result<bool, LinkError> {
-    let target = fs::read_link(link)
+    let target = link_target(link).await?;
+    Ok(roots.iter().any(|root| target.starts_with(root)))
+}
+
+/// The symlink's target as an absolute path. A relative target, as a
+/// hand-placed link often has, is resolved against the link's directory
+/// lexically: the target need not exist, and resolving through further
+/// symlinks would answer a different question than where this link points.
+async fn link_target(link: &Path) -> Result<PathBuf, LinkError> {
+    let raw = fs::read_link(link)
         .await
         .map_err(|e| LinkError::from_io(link.to_path_buf(), e))?;
-    Ok(roots.iter().any(|root| target.starts_with(root)))
+    if raw.is_absolute() {
+        return Ok(raw);
+    }
+    let mut out = link.parent().map(Path::to_path_buf).unwrap_or_default();
+    for component in raw.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    Ok(out)
 }
 
 /// Remove every file and symlink under `dir` except symlinks pointing

@@ -386,8 +386,10 @@ pub async fn propagate_delete_movie<P: FfprobeProber>(
             );
             continue;
         };
-        // A sibling holding a file grabbed it itself: the title is its
-        // own, and the cascade would destroy that file (MED-2).
+        // A file in the sibling's storage is the sibling's, however it got
+        // there (the add cascade's own search included): deleting the
+        // record with deleteFiles would destroy it (MED-2). The cascade
+        // only cancels records still waiting for a file.
         if existing.has_file {
             info!(
                 target = %target.name,

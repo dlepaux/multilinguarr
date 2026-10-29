@@ -14,8 +14,11 @@
 //!      instance and must not be touched.
 //!    - Hardlink instances: refuse to remove the last hardlink
 //!      (`is_last_hardlink == true`), which would orphan the file.
-//!    Alternate deletes follow the same ownership rule in their own
-//!    library: a link into another instance's storage is kept.
+//!    - Alternate deletes follow the same ownership rule in their own
+//!      library: a symlink into another instance's storage is kept. A
+//!      hardlink carries no target to check, so a hardlink instance's
+//!      alternate delete still removes every entry; the file survives
+//!      in the storage that holds it.
 //! 4. For primary instances, propagate the delete to other instances
 //!    via the arr API (08b `cross_instance` helpers), skipping any
 //!    sibling record that holds files of its own.
