@@ -177,6 +177,56 @@ impl LinkManager {
         prune_empty_parents(&target, &self.library_root).await
     }
 
+    /// Remove a top-level library folder like [`Self::unlink_folder`],
+    /// but keep every symlink that resolves into one of `kept_roots`.
+    /// Such a link serves another instance's file, and an instance only
+    /// deletes what lives in its own storage. The walk goes link by link
+    /// because one series tree can hold both kinds. Directories left
+    /// empty are removed. Returns how many links were kept.
+    ///
+    /// # Errors
+    ///
+    /// - [`LinkError::InvalidRelativePath`] if `folder_name` is absolute or contains `..`.
+    /// - [`LinkError::Io`] / [`LinkError::PermissionDenied`] on filesystem failure.
+    pub async fn unlink_folder_keeping(
+        &self,
+        folder_name: &str,
+        kept_roots: &[PathBuf],
+    ) -> Result<usize, LinkError> {
+        reject_unsafe_relative(Path::new(folder_name))?;
+        let top = self.library_root.join(folder_name);
+        let meta = match fs::symlink_metadata(&top).await {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(LinkError::from_io(top, e)),
+        };
+        if !meta.is_dir() {
+            if meta.file_type().is_symlink() && link_points_into(&top, kept_roots).await? {
+                return Ok(1);
+            }
+            self.unlink_folder(folder_name).await?;
+            return Ok(0);
+        }
+
+        let (kept, dirs) = remove_links_except_into(&top, kept_roots).await?;
+        // `dirs` lists parents before children: reversed, each directory
+        // is tried only after everything beneath it.
+        for dir in dirs.iter().rev() {
+            match fs::remove_dir(dir).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+                Err(e) => return Err(LinkError::from_io(dir.clone(), e)),
+            }
+        }
+        if !fs::try_exists(&top)
+            .await
+            .map_err(|e| LinkError::from_io(top.clone(), e))?
+        {
+            prune_empty_parents(&top, &self.library_root).await?;
+        }
+        Ok(kept)
+    }
+
     /// **Storage-aware delete probe.** For a hardlink instance, return
     /// `true` when the file at `library_path/relative` is the *last*
     /// hardlink to its inode (`nlink == 1`) — meaning removing it
@@ -235,12 +285,9 @@ impl LinkManager {
         }
         let target = self.library_root.join(relative);
         match fs::symlink_metadata(&target).await {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                let link_target = fs::read_link(&target)
-                    .await
-                    .map_err(|e| LinkError::from_io(target.clone(), e))?;
-                Ok(link_target.starts_with(foreign_storage_root))
-            }
+            Ok(meta) if meta.file_type().is_symlink() => Ok(link_target(&target)
+                .await?
+                .starts_with(foreign_storage_root)),
             Ok(meta) if meta.is_dir() => {
                 first_symlink_resolves_into(&target, foreign_storage_root).await
             }
@@ -685,16 +732,84 @@ async fn first_symlink_resolves_into(dir: &Path, foreign_root: &Path) -> Result<
                 .await
                 .map_err(|e| LinkError::from_io(path.clone(), e))?;
             if meta.file_type().is_symlink() {
-                let link_target = fs::read_link(&path)
-                    .await
-                    .map_err(|e| LinkError::from_io(path.clone(), e))?;
-                return Ok(link_target.starts_with(foreign_root));
+                return Ok(link_target(&path).await?.starts_with(foreign_root));
             } else if meta.is_dir() {
                 stack.push(path);
             }
         }
     }
     Ok(false)
+}
+
+/// Whether the symlink at `link` points under one of `roots`.
+async fn link_points_into(link: &Path, roots: &[PathBuf]) -> Result<bool, LinkError> {
+    let target = link_target(link).await?;
+    Ok(roots.iter().any(|root| target.starts_with(root)))
+}
+
+/// The symlink's target as an absolute, lexically normalised path. A
+/// relative target, as a hand-placed link often has, is resolved against
+/// the link's directory; `..` is folded in both cases so a target cannot
+/// climb out of a root and still match it. Lexical on purpose: the target
+/// need not exist, and the question is where this link points, not where
+/// its target's own links lead.
+async fn link_target(link: &Path) -> Result<PathBuf, LinkError> {
+    let raw = fs::read_link(link)
+        .await
+        .map_err(|e| LinkError::from_io(link.to_path_buf(), e))?;
+    let mut out = if raw.is_absolute() {
+        PathBuf::new()
+    } else {
+        link.parent().map(Path::to_path_buf).unwrap_or_default()
+    };
+    for component in raw.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    Ok(out)
+}
+
+/// Remove every file and symlink under `dir` except symlinks pointing
+/// under `kept_roots`. Returns the kept count and every directory
+/// visited, parents before children.
+async fn remove_links_except_into(
+    dir: &Path,
+    kept_roots: &[PathBuf],
+) -> Result<(usize, Vec<PathBuf>), LinkError> {
+    let mut kept = 0;
+    let mut visited = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let mut entries = fs::read_dir(&current)
+            .await
+            .map_err(|e| LinkError::from_io(current.clone(), e))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| LinkError::from_io(current.clone(), e))?
+        {
+            let path = entry.path();
+            let meta = fs::symlink_metadata(&path)
+                .await
+                .map_err(|e| LinkError::from_io(path.clone(), e))?;
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.file_type().is_symlink() && link_points_into(&path, kept_roots).await? {
+                kept += 1;
+            } else {
+                fs::remove_file(&path)
+                    .await
+                    .map_err(|e| LinkError::from_io(path.clone(), e))?;
+            }
+        }
+        visited.push(current);
+    }
+    Ok((kept, visited))
 }
 
 #[cfg(unix)]

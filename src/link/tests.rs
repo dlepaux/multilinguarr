@@ -754,3 +754,149 @@ mod dedup_policy {
         assert_eq!(dedup_verdict(Some(&fr), &en, &es_lib), DedupVerdict::Skip);
     }
 }
+
+// ---------- unlink_folder_keeping ----------
+
+/// A sandbox with a second, foreign storage root beside the library.
+async fn sandbox_with_foreign() -> (Sandbox, PathBuf) {
+    let sandbox = Sandbox::new().await;
+    let foreign = sandbox.library.parent().unwrap().join("foreign");
+    fs::create_dir_all(&foreign).await.unwrap();
+    (sandbox, foreign)
+}
+
+#[tokio::test]
+async fn unlink_folder_keeping_removes_an_own_top_level_symlink() {
+    let (sandbox, foreign) = sandbox_with_foreign().await;
+    write_file(&sandbox.storage.join("Movie/movie.mkv"), "x").await;
+    let manager = sandbox.manager(InstanceKind::Radarr, LinkStrategy::Symlink);
+    manager.link_movie("Movie").await.unwrap();
+
+    let kept = manager
+        .unlink_folder_keeping("Movie", &[foreign])
+        .await
+        .unwrap();
+
+    assert_eq!(kept, 0);
+    assert!(!fs::try_exists(sandbox.library.join("Movie")).await.unwrap());
+}
+
+#[tokio::test]
+async fn unlink_folder_keeping_prunes_a_tree_left_empty() {
+    let (sandbox, foreign) = sandbox_with_foreign().await;
+    write_file(&sandbox.storage.join("Show/Season 01/S01E01.mkv"), "x").await;
+    let manager = sandbox.manager(InstanceKind::Sonarr, LinkStrategy::Symlink);
+    manager
+        .link_episode(Path::new("Show/Season 01/S01E01.mkv"))
+        .await
+        .unwrap();
+
+    let kept = manager
+        .unlink_folder_keeping("Show", &[foreign])
+        .await
+        .unwrap();
+
+    assert_eq!(kept, 0);
+    assert!(!fs::try_exists(sandbox.library.join("Show")).await.unwrap());
+    assert!(fs::try_exists(&sandbox.library).await.unwrap());
+}
+
+#[tokio::test]
+async fn unlink_folder_keeping_returns_zero_for_a_missing_folder() {
+    let (sandbox, foreign) = sandbox_with_foreign().await;
+    let manager = sandbox.manager(InstanceKind::Sonarr, LinkStrategy::Symlink);
+    assert_eq!(
+        manager
+            .unlink_folder_keeping("Nothing", &[foreign])
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+/// A hand-placed fallback link is often relative; it still points into
+/// the foreign storage and must survive.
+#[tokio::test]
+async fn unlink_folder_keeping_keeps_a_relative_link_into_a_kept_root() {
+    let (sandbox, foreign) = sandbox_with_foreign().await;
+    write_file(&foreign.join("Show/Season 01/S01E02.mkv"), "theirs").await;
+    write_file(&sandbox.storage.join("Show/Season 01/S01E01.mkv"), "ours").await;
+    let manager = sandbox.manager(InstanceKind::Sonarr, LinkStrategy::Symlink);
+    manager
+        .link_episode(Path::new("Show/Season 01/S01E01.mkv"))
+        .await
+        .unwrap();
+    let season = sandbox.library.join("Show/Season 01");
+    std::os::unix::fs::symlink(
+        "../../../foreign/Show/Season 01/S01E02.mkv",
+        season.join("S01E02.mkv"),
+    )
+    .unwrap();
+
+    let kept = manager
+        .unlink_folder_keeping("Show", &[foreign])
+        .await
+        .unwrap();
+
+    assert_eq!(kept, 1);
+    assert_eq!(read_file(&season.join("S01E02.mkv")).await, "theirs");
+    assert!(!fs::try_exists(season.join("S01E01.mkv")).await.unwrap());
+}
+
+#[tokio::test]
+async fn resolves_into_follows_a_relative_symlink() {
+    let (sandbox, foreign) = sandbox_with_foreign().await;
+    write_file(&foreign.join("Show/Season 01/S01E02.mkv"), "theirs").await;
+    let season = sandbox.library.join("Show/Season 01");
+    fs::create_dir_all(&season).await.unwrap();
+    std::os::unix::fs::symlink(
+        "../../../foreign/Show/Season 01/S01E02.mkv",
+        season.join("S01E02.mkv"),
+    )
+    .unwrap();
+    let manager = sandbox.manager(InstanceKind::Sonarr, LinkStrategy::Symlink);
+
+    assert!(manager
+        .resolves_into(Path::new("Show/Season 01/S01E02.mkv"), &foreign)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn unlink_folder_keeping_keeps_a_top_level_link_into_a_kept_root() {
+    let (sandbox, foreign) = sandbox_with_foreign().await;
+    write_file(&foreign.join("Movie/movie.mkv"), "theirs").await;
+    let manager = sandbox.manager(InstanceKind::Radarr, LinkStrategy::Symlink);
+    manager
+        .link_movie_from(&foreign.join("Movie"), "Movie")
+        .await
+        .unwrap();
+
+    let kept = manager
+        .unlink_folder_keeping("Movie", &[foreign])
+        .await
+        .unwrap();
+
+    assert_eq!(kept, 1);
+    assert_eq!(
+        read_file(&sandbox.library.join("Movie/movie.mkv")).await,
+        "theirs"
+    );
+}
+
+#[tokio::test]
+async fn unlink_folder_keeping_does_not_keep_an_absolute_link_that_climbs_out() {
+    let (sandbox, foreign) = sandbox_with_foreign().await;
+    write_file(&sandbox.storage.join("Movie/movie.mkv"), "ours").await;
+    let manager = sandbox.manager(InstanceKind::Radarr, LinkStrategy::Symlink);
+    let climbing = foreign.join("..").join("storage").join("Movie");
+    std::os::unix::fs::symlink(&climbing, sandbox.library.join("Movie")).unwrap();
+
+    let kept = manager
+        .unlink_folder_keeping("Movie", &[foreign])
+        .await
+        .unwrap();
+
+    assert_eq!(kept, 0);
+    assert!(!fs::try_exists(sandbox.library.join("Movie")).await.unwrap());
+}

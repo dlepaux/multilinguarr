@@ -58,6 +58,13 @@ When a primary instance (e.g., Radarr-FR) imports a single-language file:
 
 This ensures each instance has its own file — no shared storage between instances.
 
+## Deletes
+
+An instance only deletes what lives in its own storage.
+
+- **Primary delete.** The title's links go from every library whose link resolves into the primary's storage. The delete then propagates to the alternate instances, but only to a record that holds no file of its own: a Radarr movie with `hasFile: false`, or a Sonarr series whose `statistics.episodeFileCount` is 0. A sibling that holds a file keeps its record and its file, including one the add cascade asked to search, so once a sibling has downloaded, deleting the title on the primary leaves it alone and it must be deleted on the sibling too. A Sonarr record that reports no statistics is also kept, since it cannot prove it owns nothing.
+- **Alternate delete.** Only the alternate's own library changes, and nothing propagates. Within that library, a symlink that resolves into another instance's storage is kept, whether its target is absolute or relative: it serves that instance's file, and regeneration cannot rebuild a hand-placed fallback link. The target is compared as a path inside the container, so a link written with a host path is not recognised. Hardlink instances get no such protection, since a hardlink names no target: their alternate delete removes every entry, and the file survives in the storage that holds it.
+
 ## Regeneration
 
 `POST /api/v1/admin/regenerate` walks all storage directories, runs ffprobe on every file, and rebuilds the entire link tree. Use this:

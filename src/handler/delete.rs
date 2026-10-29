@@ -14,8 +14,14 @@
 //!      instance and must not be touched.
 //!    - Hardlink instances: refuse to remove the last hardlink
 //!      (`is_last_hardlink == true`), which would orphan the file.
+//!    - Alternate deletes follow the same ownership rule in their own
+//!      library: a symlink into another instance's storage is kept. A
+//!      hardlink carries no target to check, so a hardlink instance's
+//!      alternate delete still removes every entry; the file survives
+//!      in the storage that holds it.
 //! 4. For primary instances, propagate the delete to other instances
-//!    via the arr API (08b `cross_instance` helpers).
+//!    via the arr API (08b `cross_instance` helpers), skipping any
+//!    sibling record that holds files of its own.
 //! 5. Trigger a Jellyfin refresh.
 
 use std::path::{Path, PathBuf};
@@ -66,7 +72,12 @@ pub async fn handle_radarr_movie_delete<P: FfprobeProber>(
             // Alternate delete: only this instance's library, never
             // propagate, never touch the primary library.
             let mgr = registry.link_manager(&instance.name)?;
-            unlink_movie_local_only(mgr, &folder_name).await?;
+            unlink_movie_local_only(
+                mgr,
+                &foreign_storage_roots(registry, instance),
+                &folder_name,
+            )
+            .await?;
         }
 
         registry.jellyfin.refresh().await;
@@ -106,7 +117,12 @@ pub async fn handle_radarr_movie_file_delete<P: FfprobeProber>(
             // instance still owns its own copy independently.
         } else {
             let mgr = registry.link_manager(&instance.name)?;
-            unlink_movie_local_only(mgr, &folder_name).await?;
+            unlink_movie_local_only(
+                mgr,
+                &foreign_storage_roots(registry, instance),
+                &folder_name,
+            )
+            .await?;
         }
 
         registry.jellyfin.refresh().await;
@@ -148,7 +164,12 @@ pub async fn handle_sonarr_series_delete<P: FfprobeProber>(
             propagate_delete_series(registry, instance, series_ref.tvdb_id, true).await?;
         } else {
             let mgr = registry.link_manager(&instance.name)?;
-            unlink_series_local_only(mgr, &folder_name).await?;
+            unlink_series_local_only(
+                mgr,
+                &foreign_storage_roots(registry, instance),
+                &folder_name,
+            )
+            .await?;
         }
 
         registry.jellyfin.refresh().await;
@@ -195,7 +216,8 @@ pub async fn handle_sonarr_episode_file_delete<P: FfprobeProber>(
             // Same rationale as MovieFileDelete: do not propagate.
         } else {
             let mgr = registry.link_manager(&instance.name)?;
-            unlink_episode_local_only(mgr, &relative).await?;
+            unlink_episode_local_only(mgr, &foreign_storage_roots(registry, instance), &relative)
+                .await?;
         }
 
         registry.jellyfin.refresh().await;
@@ -229,18 +251,43 @@ async fn unlink_movie_everywhere_owned_by<P: FfprobeProber>(
     source: &InstanceConfig,
     folder_name: &str,
 ) -> Result<(), HandlerError> {
+    let kept_roots = foreign_storage_roots(registry, source);
     for (target, mgr) in registry.instances_with_link_managers() {
         if target.kind != InstanceKind::Radarr {
             continue;
         }
-        unlink_storage_aware(mgr, target, source, folder_name).await?;
+        unlink_storage_aware(mgr, target, source, &kept_roots, folder_name).await?;
     }
     Ok(())
 }
 
-async fn unlink_movie_local_only(mgr: &LinkManager, folder_name: &str) -> Result<(), HandlerError> {
-    mgr.unlink_folder(folder_name).await?;
-    info!("alternate movie delete — local library entry removed");
+/// Every storage root but `instance`'s. A delete keeps the links that
+/// resolve into these: they serve another instance's file, and
+/// `regenerate` cannot rebuild a hand-placed fallback link (MED-2).
+fn foreign_storage_roots<P: FfprobeProber>(
+    registry: &HandlerRegistry<P>,
+    instance: &InstanceConfig,
+) -> Vec<PathBuf> {
+    registry
+        .config_instances()
+        .iter()
+        .filter(|other| other.name != instance.name)
+        .map(|other| other.storage_path.clone())
+        .collect()
+}
+
+async fn unlink_movie_local_only(
+    mgr: &LinkManager,
+    foreign_roots: &[PathBuf],
+    folder_name: &str,
+) -> Result<(), HandlerError> {
+    let kept = mgr
+        .unlink_folder_keeping(folder_name, foreign_roots)
+        .await?;
+    info!(
+        kept,
+        "alternate movie delete — own library entry removed, foreign links kept"
+    );
     Ok(())
 }
 
@@ -249,21 +296,28 @@ async fn unlink_series_everywhere_owned_by<P: FfprobeProber>(
     source: &InstanceConfig,
     folder_name: &str,
 ) -> Result<(), HandlerError> {
+    let kept_roots = foreign_storage_roots(registry, source);
     for (target, mgr) in registry.instances_with_link_managers() {
         if target.kind != InstanceKind::Sonarr {
             continue;
         }
-        unlink_storage_aware(mgr, target, source, folder_name).await?;
+        unlink_storage_aware(mgr, target, source, &kept_roots, folder_name).await?;
     }
     Ok(())
 }
 
 async fn unlink_series_local_only(
     mgr: &LinkManager,
+    foreign_roots: &[PathBuf],
     folder_name: &str,
 ) -> Result<(), HandlerError> {
-    mgr.unlink_folder(folder_name).await?;
-    info!("alternate series delete — local library tree removed");
+    let kept = mgr
+        .unlink_folder_keeping(folder_name, foreign_roots)
+        .await?;
+    info!(
+        kept,
+        "alternate series delete — own links removed, foreign links kept"
+    );
     Ok(())
 }
 
@@ -281,21 +335,33 @@ async fn unlink_episode_everywhere_owned_by<P: FfprobeProber>(
     Ok(())
 }
 
-async fn unlink_episode_local_only(mgr: &LinkManager, relative: &Path) -> Result<(), HandlerError> {
+async fn unlink_episode_local_only(
+    mgr: &LinkManager,
+    foreign_roots: &[PathBuf],
+    relative: &Path,
+) -> Result<(), HandlerError> {
+    for root in foreign_roots {
+        if mgr.resolves_into(relative, root).await? {
+            info!("alternate episode delete — link serves another instance's file, kept");
+            return Ok(());
+        }
+    }
     mgr.unlink_episode(relative).await?;
     info!("alternate episode delete — local link removed");
     Ok(())
 }
 
-/// Unlink a movie folder from `target`'s library only when the
-/// existing link is "owned" by `source`'s storage.
+/// Unlink a title folder from `target`'s library, removing only the
+/// links owned by `source`'s storage: `kept_roots` is every other
+/// instance's storage, `target`'s own included, so a sibling that keeps
+/// its record also keeps its links (MED-2).
 async fn unlink_storage_aware(
     target_mgr: &LinkManager,
     target: &InstanceConfig,
     source: &InstanceConfig,
+    kept_roots: &[PathBuf],
     folder_name: &str,
 ) -> Result<(), HandlerError> {
-    let relative = Path::new(folder_name);
     if target.name == source.name {
         target_mgr.unlink_folder(folder_name).await?;
         info!(target = %target.name, "library entry removed from source instance");
@@ -303,18 +369,14 @@ async fn unlink_storage_aware(
     }
     match target.link_strategy {
         crate::config::LinkStrategy::Symlink => {
-            if target_mgr
-                .resolves_into(relative, &source.storage_path)
-                .await?
-            {
-                target_mgr.unlink_folder(folder_name).await?;
-                info!(target = %target.name, "cross-instance link removed (resolved into source storage)");
-            } else {
-                info!(
-                    target = %target.name,
-                    "library entry not owned by source — leaving in place"
-                );
-            }
+            let kept = target_mgr
+                .unlink_folder_keeping(folder_name, kept_roots)
+                .await?;
+            info!(
+                target = %target.name,
+                kept,
+                "links into source storage removed, other links kept"
+            );
         }
         crate::config::LinkStrategy::Hardlink => {
             // For directory-level hardlink mirrors there is no single
