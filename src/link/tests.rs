@@ -861,3 +861,42 @@ async fn resolves_into_follows_a_relative_symlink() {
         .await
         .unwrap());
 }
+
+#[tokio::test]
+async fn unlink_folder_keeping_keeps_a_top_level_link_into_a_kept_root() {
+    let (sandbox, foreign) = sandbox_with_foreign().await;
+    write_file(&foreign.join("Movie/movie.mkv"), "theirs").await;
+    let manager = sandbox.manager(InstanceKind::Radarr, LinkStrategy::Symlink);
+    manager
+        .link_movie_from(&foreign.join("Movie"), "Movie")
+        .await
+        .unwrap();
+
+    let kept = manager
+        .unlink_folder_keeping("Movie", &[foreign])
+        .await
+        .unwrap();
+
+    assert_eq!(kept, 1);
+    assert_eq!(
+        read_file(&sandbox.library.join("Movie/movie.mkv")).await,
+        "theirs"
+    );
+}
+
+#[tokio::test]
+async fn unlink_folder_keeping_does_not_keep_an_absolute_link_that_climbs_out() {
+    let (sandbox, foreign) = sandbox_with_foreign().await;
+    write_file(&sandbox.storage.join("Movie/movie.mkv"), "ours").await;
+    let manager = sandbox.manager(InstanceKind::Radarr, LinkStrategy::Symlink);
+    let climbing = foreign.join("..").join("storage").join("Movie");
+    std::os::unix::fs::symlink(&climbing, sandbox.library.join("Movie")).unwrap();
+
+    let kept = manager
+        .unlink_folder_keeping("Movie", &[foreign])
+        .await
+        .unwrap();
+
+    assert_eq!(kept, 0);
+    assert!(!fs::try_exists(sandbox.library.join("Movie")).await.unwrap());
+}

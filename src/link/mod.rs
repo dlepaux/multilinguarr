@@ -732,10 +732,7 @@ async fn first_symlink_resolves_into(dir: &Path, foreign_root: &Path) -> Result<
                 .await
                 .map_err(|e| LinkError::from_io(path.clone(), e))?;
             if meta.file_type().is_symlink() {
-                let link_target = fs::read_link(&path)
-                    .await
-                    .map_err(|e| LinkError::from_io(path.clone(), e))?;
-                return Ok(link_target.starts_with(foreign_root));
+                return Ok(link_target(&path).await?.starts_with(foreign_root));
             } else if meta.is_dir() {
                 stack.push(path);
             }
@@ -750,18 +747,21 @@ async fn link_points_into(link: &Path, roots: &[PathBuf]) -> Result<bool, LinkEr
     Ok(roots.iter().any(|root| target.starts_with(root)))
 }
 
-/// The symlink's target as an absolute path. A relative target, as a
-/// hand-placed link often has, is resolved against the link's directory
-/// lexically: the target need not exist, and resolving through further
-/// symlinks would answer a different question than where this link points.
+/// The symlink's target as an absolute, lexically normalised path. A
+/// relative target, as a hand-placed link often has, is resolved against
+/// the link's directory; `..` is folded in both cases so a target cannot
+/// climb out of a root and still match it. Lexical on purpose: the target
+/// need not exist, and the question is where this link points, not where
+/// its target's own links lead.
 async fn link_target(link: &Path) -> Result<PathBuf, LinkError> {
     let raw = fs::read_link(link)
         .await
         .map_err(|e| LinkError::from_io(link.to_path_buf(), e))?;
-    if raw.is_absolute() {
-        return Ok(raw);
-    }
-    let mut out = link.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut out = if raw.is_absolute() {
+        PathBuf::new()
+    } else {
+        link.parent().map(Path::to_path_buf).unwrap_or_default()
+    };
     for component in raw.components() {
         match component {
             Component::ParentDir => {

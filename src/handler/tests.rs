@@ -2608,3 +2608,87 @@ async fn alternate_series_delete_removes_its_own_links_and_keeps_foreign_ones() 
             .unwrap()
     );
 }
+
+/// A sibling kept by the cascade keeps its own links too: a primary
+/// delete takes only the links into the primary's storage, whatever
+/// order the directory lists them in.
+#[tokio::test]
+async fn primary_series_delete_keeps_the_siblings_own_links_in_a_mixed_folder() {
+    let rig = Rig::new().await;
+    let fr_series = rig.primary_storage.join("Show");
+    let en_series = rig.alt_storage.join("Show");
+    write_episode_file(&fr_series, "fr").await;
+    fs::create_dir_all(en_series.join("Season 01"))
+        .await
+        .unwrap();
+    fs::write(en_series.join("Season 01/S01E02.mkv"), "en")
+        .await
+        .unwrap();
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    let alt_mgr = crate::link::LinkManager::from_instance(&cfg.instances[1]);
+    alt_mgr
+        .link_episode_from(
+            &fr_series.join("Season 01/S01E01.mkv"),
+            Path::new("Show/Season 01/S01E01.mkv"),
+        )
+        .await
+        .unwrap();
+    alt_mgr
+        .link_episode(Path::new("Show/Season 01/S01E02.mkv"))
+        .await
+        .unwrap();
+    let registry = Rig::registry(cfg, multi_audio_streams());
+    mount_sonarr_series_on_alt(&rig.alt_server, 1, 0).await;
+
+    handle_sonarr_series_delete(
+        &primary,
+        &sonarr_series_delete_event(true, fr_series.to_str().unwrap()),
+        &registry,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !fs::try_exists(rig.alt_library.join("Show/Season 01/S01E01.mkv"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        fs::try_exists(rig.alt_library.join("Show/Season 01/S01E02.mkv"))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn alternate_movie_delete_keeps_a_link_into_foreign_storage() {
+    let rig = Rig::new().await;
+    let fr_folder = rig.primary_storage.join("Shared (2024)");
+    write_movie_file(&fr_folder, "fr").await;
+    let cfg = rig.config_radarr();
+    let alternate = cfg.instances[1].clone();
+    let alt_mgr = crate::link::LinkManager::from_instance(&cfg.instances[1]);
+    alt_mgr
+        .link_movie_from(&fr_folder, "Shared (2024)")
+        .await
+        .unwrap();
+    let registry = Rig::registry(cfg, en_only_streams());
+
+    handle_radarr_movie_delete(
+        &alternate,
+        &radarr_movie_delete_event(
+            true,
+            rig.alt_storage.join("Shared (2024)").to_str().unwrap(),
+        ),
+        &registry,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        fs::try_exists(rig.alt_library.join("Shared (2024)/movie.mkv"))
+            .await
+            .unwrap()
+    );
+}

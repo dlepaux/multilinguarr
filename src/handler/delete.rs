@@ -251,18 +251,19 @@ async fn unlink_movie_everywhere_owned_by<P: FfprobeProber>(
     source: &InstanceConfig,
     folder_name: &str,
 ) -> Result<(), HandlerError> {
+    let kept_roots = foreign_storage_roots(registry, source);
     for (target, mgr) in registry.instances_with_link_managers() {
         if target.kind != InstanceKind::Radarr {
             continue;
         }
-        unlink_storage_aware(mgr, target, source, folder_name).await?;
+        unlink_storage_aware(mgr, target, source, &kept_roots, folder_name).await?;
     }
     Ok(())
 }
 
-/// Every other instance's storage root. An alternate delete keeps the
-/// links that resolve into these: they serve another instance's file,
-/// and `regenerate` cannot rebuild a hand-placed fallback link (MED-2).
+/// Every storage root but `instance`'s. A delete keeps the links that
+/// resolve into these: they serve another instance's file, and
+/// `regenerate` cannot rebuild a hand-placed fallback link (MED-2).
 fn foreign_storage_roots<P: FfprobeProber>(
     registry: &HandlerRegistry<P>,
     instance: &InstanceConfig,
@@ -295,11 +296,12 @@ async fn unlink_series_everywhere_owned_by<P: FfprobeProber>(
     source: &InstanceConfig,
     folder_name: &str,
 ) -> Result<(), HandlerError> {
+    let kept_roots = foreign_storage_roots(registry, source);
     for (target, mgr) in registry.instances_with_link_managers() {
         if target.kind != InstanceKind::Sonarr {
             continue;
         }
-        unlink_storage_aware(mgr, target, source, folder_name).await?;
+        unlink_storage_aware(mgr, target, source, &kept_roots, folder_name).await?;
     }
     Ok(())
 }
@@ -349,15 +351,17 @@ async fn unlink_episode_local_only(
     Ok(())
 }
 
-/// Unlink a movie folder from `target`'s library only when the
-/// existing link is "owned" by `source`'s storage.
+/// Unlink a title folder from `target`'s library, removing only the
+/// links owned by `source`'s storage: `kept_roots` is every other
+/// instance's storage, `target`'s own included, so a sibling that keeps
+/// its record also keeps its links (MED-2).
 async fn unlink_storage_aware(
     target_mgr: &LinkManager,
     target: &InstanceConfig,
     source: &InstanceConfig,
+    kept_roots: &[PathBuf],
     folder_name: &str,
 ) -> Result<(), HandlerError> {
-    let relative = Path::new(folder_name);
     if target.name == source.name {
         target_mgr.unlink_folder(folder_name).await?;
         info!(target = %target.name, "library entry removed from source instance");
@@ -365,18 +369,14 @@ async fn unlink_storage_aware(
     }
     match target.link_strategy {
         crate::config::LinkStrategy::Symlink => {
-            if target_mgr
-                .resolves_into(relative, &source.storage_path)
-                .await?
-            {
-                target_mgr.unlink_folder(folder_name).await?;
-                info!(target = %target.name, "cross-instance link removed (resolved into source storage)");
-            } else {
-                info!(
-                    target = %target.name,
-                    "library entry not owned by source — leaving in place"
-                );
-            }
+            let kept = target_mgr
+                .unlink_folder_keeping(folder_name, kept_roots)
+                .await?;
+            info!(
+                target = %target.name,
+                kept,
+                "links into source storage removed, other links kept"
+            );
         }
         crate::config::LinkStrategy::Hardlink => {
             // For directory-level hardlink mirrors there is no single
