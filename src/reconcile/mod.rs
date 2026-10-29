@@ -596,7 +596,7 @@ mod tests {
             _path: &Path,
             _timeout: Duration,
         ) -> impl std::future::Future<Output = Result<ProbeReport, DetectionError>> + Send {
-            std::future::ready(Ok(self.0.clone().into()))
+            std::future::ready(Ok(ProbeReport::audio_only(self.0.clone())))
         }
     }
 
@@ -1061,7 +1061,7 @@ mod tests {
             languages: HashSet::from(["fr".to_owned(), "en".to_owned()]),
             is_multi_audio: true,
             audio_streams: vec![],
-            has_empty_hevc_header: false,
+            hevc_header_bytes: None,
         };
 
         let all = vec![inst_fr.clone(), inst_en.clone(), inst_sonarr];
@@ -1087,7 +1087,7 @@ mod tests {
             languages: HashSet::from(["fr".to_owned()]),
             is_multi_audio: false,
             audio_streams: vec![],
-            has_empty_hevc_header: false,
+            hevc_header_bytes: None,
         };
 
         let all = vec![inst_fr.clone(), inst_en];

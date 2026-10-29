@@ -18,7 +18,10 @@ use std::time::Duration;
 use crate::config::LanguagesConfig;
 
 pub use error::DetectionError;
-pub use ffprobe::{parse_streams_json, AudioStream, FfprobeProber, ProbeReport, SystemFfprobe};
+pub use ffprobe::{
+    is_empty_hevc_header, parse_streams_json, AudioStream, FfprobeProber, ProbeReport,
+    SystemFfprobe,
+};
 
 /// Default per-call ffprobe timeout.
 pub const DEFAULT_FFPROBE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -34,9 +37,18 @@ pub struct DetectionResult {
     /// All audio streams ffprobe reported, retained so callers can apply
     /// the language/role/channel base-track rule for a target language.
     pub audio_streams: Vec<AudioStream>,
-    /// True when the file's HEVC video carries no parameter sets in its
-    /// header, so players that need them up front cannot start it.
-    pub has_empty_hevc_header: bool,
+    /// Size of the file's HEVC video header, `None` without HEVC video.
+    /// See [`DetectionResult::has_empty_hevc_header`].
+    pub hevc_header_bytes: Option<u32>,
+}
+
+impl DetectionResult {
+    /// True when the HEVC header carries no parameter sets, so players
+    /// that need them up front (`AVFoundation`) cannot start the file.
+    #[must_use]
+    pub fn has_empty_hevc_header(&self) -> bool {
+        is_empty_hevc_header(self.hevc_header_bytes)
+    }
 }
 
 /// The detection engine. Cloneable — holds `Arc`s internally.
@@ -89,7 +101,7 @@ impl<P: FfprobeProber> LanguageDetector<P> {
         Ok(DetectionResult {
             is_multi_audio: languages.len() >= 2,
             languages,
-            has_empty_hevc_header: report.has_empty_hevc_header(),
+            hevc_header_bytes: report.hevc_header_bytes,
             audio_streams: report.audio_streams,
         })
     }

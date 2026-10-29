@@ -160,9 +160,13 @@ impl Rig {
         cfg
     }
 
-    fn registry(cfg: Config, probe: impl Into<ProbeReport>) -> HandlerRegistry<StubFfprobe> {
+    fn registry(cfg: Config, streams: Vec<AudioStream>) -> HandlerRegistry<StubFfprobe> {
+        Self::registry_with_probe(cfg, ProbeReport::audio_only(streams))
+    }
+
+    fn registry_with_probe(cfg: Config, probe: ProbeReport) -> HandlerRegistry<StubFfprobe> {
         let languages = Arc::new(cfg.languages.clone());
-        let detector = LanguageDetector::new(languages, StubFfprobe(probe.into()));
+        let detector = LanguageDetector::new(languages, StubFfprobe(probe));
         HandlerRegistry::build(Arc::new(cfg), detector, Arc::new(NoopMediaServer))
             .expect("registry")
     }
@@ -1851,7 +1855,7 @@ async fn radarr_import_with_empty_hevc_header_increments_counter_observe_only() 
     let primary = cfg.instances[0].clone();
     let file_path = folder.join("movie.mkv");
     let event = radarr_download_event(folder.to_str().unwrap(), file_path.to_str().unwrap());
-    let registry = Rig::registry(cfg, empty_hevc_header_probe());
+    let registry = Rig::registry_with_probe(cfg, empty_hevc_header_probe());
 
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
@@ -1887,7 +1891,7 @@ async fn sonarr_import_with_empty_hevc_header_increments_counter_observe_only() 
     let primary = cfg.instances[0].clone();
     let episode_path = series_dir.join("Season 01/S01E01.mkv");
     let event = sonarr_download_event(series_dir.to_str().unwrap(), episode_path.to_str().unwrap());
-    let registry = Rig::registry(cfg, empty_hevc_header_probe());
+    let registry = Rig::registry_with_probe(cfg, empty_hevc_header_probe());
 
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
@@ -1927,7 +1931,7 @@ async fn radarr_import_with_healthy_hevc_header_does_not_count() {
     let event = radarr_download_event(folder.to_str().unwrap(), file_path.to_str().unwrap());
     let mut probe = empty_hevc_header_probe();
     probe.hevc_header_bytes = Some(110);
-    let registry = Rig::registry(cfg, probe);
+    let registry = Rig::registry_with_probe(cfg, probe);
 
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
@@ -1944,6 +1948,7 @@ async fn radarr_import_with_healthy_hevc_header_does_not_count() {
         "a healthy header must not count:\n{render}"
     );
 }
+
 // =====================================================================
 // Wrong-language skip counter
 // =====================================================================

@@ -55,7 +55,7 @@ pub fn register_hevc_header_counters(instances: &[InstanceConfig]) {
 /// plays fine everywhere except players that need the parameter sets up
 /// front. The counter tells the operator to repair or replace it.
 fn observe_hevc_header(instance: &InstanceConfig, file: &Path, detection: &DetectionResult) {
-    if !detection.has_empty_hevc_header {
+    if !detection.has_empty_hevc_header() {
         return;
     }
     metrics::counter!(
@@ -66,7 +66,8 @@ fn observe_hevc_header(instance: &InstanceConfig, file: &Path, detection: &Detec
     warn!(
         file = %file.display(),
         instance = %instance.name,
-        "HEVC header carries no parameter sets — Apple TV direct play will fail"
+        header_bytes = ?detection.hevc_header_bytes,
+        "HEVC header carries no parameter sets — cannot direct-play on Apple TV"
     );
 }
 

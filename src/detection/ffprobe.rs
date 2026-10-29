@@ -41,27 +41,34 @@ const HEVC_MIN_HEADER_BYTES: u32 = 50;
 pub struct ProbeReport {
     pub audio_streams: Vec<AudioStream>,
     /// `extradata_size` of the first HEVC video stream, `None` when the
-    /// file has no HEVC video or ffprobe did not report the size.
+    /// file has no HEVC video.
     pub hevc_header_bytes: Option<u32>,
 }
 
 impl ProbeReport {
-    /// True when the file's HEVC video lacks its parameter sets — see
-    /// [`HEVC_MIN_HEADER_BYTES`].
+    /// A report that says nothing about the video, for probes that only
+    /// look at audio.
     #[must_use]
-    pub fn has_empty_hevc_header(&self) -> bool {
-        self.hevc_header_bytes
-            .is_some_and(|b| b < HEVC_MIN_HEADER_BYTES)
-    }
-}
-
-impl From<Vec<AudioStream>> for ProbeReport {
-    fn from(audio_streams: Vec<AudioStream>) -> Self {
+    pub fn audio_only(audio_streams: Vec<AudioStream>) -> Self {
         Self {
             audio_streams,
             hevc_header_bytes: None,
         }
     }
+
+    /// True when the file's HEVC video lacks its parameter sets — see
+    /// [`HEVC_MIN_HEADER_BYTES`].
+    #[must_use]
+    pub fn has_empty_hevc_header(&self) -> bool {
+        is_empty_hevc_header(self.hevc_header_bytes)
+    }
+}
+
+/// True when an HEVC header of `bytes` cannot hold its parameter sets.
+/// `None` (no HEVC video) is never empty.
+#[must_use]
+pub fn is_empty_hevc_header(bytes: Option<u32>) -> bool {
+    bytes.is_some_and(|b| b < HEVC_MIN_HEADER_BYTES)
 }
 
 /// Abstraction over "run ffprobe and report on the file". The real
@@ -170,7 +177,8 @@ pub fn parse_streams_json(json: &str) -> Result<ProbeReport, serde_json::Error> 
         .find(|s| {
             s.codec_type.as_deref() == Some("video") && s.codec_name.as_deref() == Some("hevc")
         })
-        .and_then(|s| s.extradata_size);
+        // ffprobe omits the field when it is zero.
+        .map(|s| s.extradata_size.unwrap_or(0));
     let audio_streams = envelope
         .streams
         .into_iter()

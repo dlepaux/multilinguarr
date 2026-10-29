@@ -65,7 +65,7 @@ impl FfprobeProber for StubFfprobe {
         _timeout: Duration,
     ) -> impl std::future::Future<Output = Result<ProbeReport, DetectionError>> + Send {
         std::future::ready(match &self.response {
-            Ok(v) => Ok(v.clone().into()),
+            Ok(v) => Ok(ProbeReport::audio_only(v.clone())),
             Err(_) => Err(DetectionError::FfprobeUnavailable),
         })
     }
@@ -361,4 +361,24 @@ fn hevc_header_is_empty_below_a_parameter_set() {
     assert!(report(Some(23)).has_empty_hevc_header());
     assert!(!report(Some(110)).has_empty_hevc_header());
     assert!(!report(None).has_empty_hevc_header());
+}
+
+/// ffprobe omits `extradata_size` when it is zero: an HEVC stream without
+/// the field has the emptiest header of all.
+#[test]
+fn parse_streams_reads_a_missing_hevc_header_size_as_zero() {
+    let json = r#"{"streams":[{ "codec_type": "video", "codec_name": "hevc" }]}"#;
+    let out = parse_streams_json(json).unwrap();
+    assert_eq!(out.hevc_header_bytes, Some(0));
+    assert!(out.has_empty_hevc_header());
+}
+
+#[test]
+fn hevc_header_threshold_is_fifty_bytes() {
+    let report = |bytes| ProbeReport {
+        audio_streams: vec![],
+        hevc_header_bytes: Some(bytes),
+    };
+    assert!(report(49).has_empty_hevc_header());
+    assert!(!report(50).has_empty_hevc_header());
 }
