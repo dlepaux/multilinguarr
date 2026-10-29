@@ -1,3 +1,18 @@
+# [1.4.0](https://github.com/dlepaux/multilinguarr/compare/v1.3.7...v1.4.0) (2026-10-29)
+
+
+### Bug Fixes
+
+* **delete:** a primary delete keeps a sibling's own links (MED-2) ([e909560](https://github.com/dlepaux/multilinguarr/commit/e9095603c6a1e66c038d240b83db165a5486a5bd))
+* **delete:** never destroy what a sibling instance owns ([b01225b](https://github.com/dlepaux/multilinguarr/commit/b01225b8b1686664baf2775d8ab35903be2928d8))
+* **detection:** read a missing HEVC header size as zero (MED-23) ([d4ea067](https://github.com/dlepaux/multilinguarr/commit/d4ea067567658fdfaf92b6aabbe97d95386ca3f5))
+* **link:** keep relative fallback links on alternate deletes (MED-2) ([17a5ead](https://github.com/dlepaux/multilinguarr/commit/17a5eadb7c05ed4d54f8a7da48c5751b86676380))
+
+
+### Features
+
+* **detection:** count imports whose HEVC header lacks parameter sets (MED-23) ([8614abd](https://github.com/dlepaux/multilinguarr/commit/8614abd321ed92089be4c7e63eaee6bb9b73af2a))
+
 ## [1.3.7](https://github.com/dlepaux/multilinguarr/compare/v1.3.6...v1.3.7) (2026-10-24)
 
 
