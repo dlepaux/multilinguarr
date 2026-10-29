@@ -10,4 +10,5 @@ mod registry;
 mod tests;
 
 pub use error::{register_failure_counters, HandlerError};
+pub use import::register_hevc_header_counters;
 pub use registry::HandlerRegistry;

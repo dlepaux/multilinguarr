@@ -37,7 +37,7 @@ use crate::config::{
     LinkStrategy, QueueConfig,
 };
 use crate::db::Database;
-use crate::detection::{AudioStream, DetectionError, FfprobeProber, LanguageDetector};
+use crate::detection::{AudioStream, DetectionError, FfprobeProber, LanguageDetector, ProbeReport};
 use crate::jellyfin::NoopMediaServer;
 use crate::queue::{JobPayload, JobProcessor, JobStore, ProcessOutcome};
 use crate::webhook::{
@@ -160,24 +160,24 @@ impl Rig {
         cfg
     }
 
-    fn registry(cfg: Config, streams: Vec<AudioStream>) -> HandlerRegistry<StubFfprobe> {
+    fn registry(cfg: Config, probe: impl Into<ProbeReport>) -> HandlerRegistry<StubFfprobe> {
         let languages = Arc::new(cfg.languages.clone());
-        let detector = LanguageDetector::new(languages, StubFfprobe(streams));
+        let detector = LanguageDetector::new(languages, StubFfprobe(probe.into()));
         HandlerRegistry::build(Arc::new(cfg), detector, Arc::new(NoopMediaServer))
             .expect("registry")
     }
 }
 
-/// Stub ffprobe that returns pre-configured audio streams for any path.
+/// Stub ffprobe that returns a pre-configured report for any path.
 #[derive(Debug, Clone)]
-struct StubFfprobe(Vec<AudioStream>);
+struct StubFfprobe(ProbeReport);
 
 impl FfprobeProber for StubFfprobe {
     fn probe(
         &self,
         _path: &Path,
         _timeout: std::time::Duration,
-    ) -> impl std::future::Future<Output = Result<Vec<AudioStream>, DetectionError>> + Send {
+    ) -> impl std::future::Future<Output = Result<ProbeReport, DetectionError>> + Send {
         std::future::ready(Ok(self.0.clone()))
     }
 }
@@ -892,6 +892,31 @@ fn every_failure_kind_is_exported_at_zero_before_the_first_failure() {
                 "multilinguarr_handler_failures_total{{kind=\"{kind}\"}} 0"
             )),
             "{kind} missing in:\n{render}"
+        );
+    }
+}
+
+/// Same reason as the failure kinds: the first bare-HEVC import after a
+/// restart must be visible to `increase()`.
+#[tokio::test]
+async fn hevc_header_counter_is_exported_at_zero_for_every_instance() {
+    let rig = Rig::new().await;
+    let cfg = rig.config_radarr();
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        super::register_hevc_header_counters(&cfg.instances);
+    });
+    let render = handle.render();
+
+    for instance in &cfg.instances {
+        assert!(
+            render.contains(&format!(
+                "multilinguarr_hevc_empty_header_total{{instance=\"{}\"}} 0",
+                instance.name
+            )),
+            "{} missing in:\n{render}",
+            instance.name
         );
     }
 }
@@ -1797,6 +1822,128 @@ async fn sonarr_import_no_base_audio_track_increments_counter_observe_only() {
     );
 }
 
+// =====================================================================
+// HEVC header counter (observe-only: linking is unchanged)
+// =====================================================================
+
+fn empty_hevc_header_probe() -> ProbeReport {
+    ProbeReport {
+        audio_streams: vec![AudioStream {
+            language: Some("fra".to_owned()),
+            channels: Some(6),
+            is_commentary: false,
+        }],
+        hevc_header_bytes: Some(23),
+    }
+}
+
+#[tokio::test]
+async fn radarr_import_with_empty_hevc_header_increments_counter_observe_only() {
+    let rig = Rig::new().await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
+    let folder = rig.primary_storage.join("Bare HEVC (2024)");
+    write_movie_file(&folder, "hevc-no-params").await;
+    mount_radarr_lookup_empty(&rig.alt_server, "k2").await;
+    mount_radarr_quality_and_root(&rig.alt_server).await;
+    mount_radarr_add(&rig.alt_server).await;
+
+    let cfg = rig.config_radarr();
+    let primary = cfg.instances[0].clone();
+    let file_path = folder.join("movie.mkv");
+    let event = radarr_download_event(folder.to_str().unwrap(), file_path.to_str().unwrap());
+    let registry = Rig::registry(cfg, empty_hevc_header_probe());
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    handle_radarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    drop(recorder_guard);
+    let render = handle.render();
+    assert!(
+        render.contains("multilinguarr_hevc_empty_header_total{instance=\"radarr-fr\"} 1"),
+        "expected HEVC header counter with radarr labels in:\n{render}"
+    );
+    assert!(
+        fs::try_exists(rig.primary_library.join("Bare HEVC (2024)/movie.mkv"))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn sonarr_import_with_empty_hevc_header_increments_counter_observe_only() {
+    let rig = Rig::new().await;
+    let series_dir = rig.primary_storage.join("Bare HEVC Show");
+    write_episode_file(&series_dir, "hevc-no-params").await;
+    mount_sonarr_source_series(&rig.primary_server, "k1").await;
+    mount_sonarr_lookup_empty(&rig.alt_server, "k2").await;
+    mount_sonarr_quality_root_and_add(&rig.alt_server).await;
+
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    let episode_path = series_dir.join("Season 01/S01E01.mkv");
+    let event = sonarr_download_event(series_dir.to_str().unwrap(), episode_path.to_str().unwrap());
+    let registry = Rig::registry(cfg, empty_hevc_header_probe());
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    handle_sonarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    drop(recorder_guard);
+    let render = handle.render();
+    assert!(
+        render.contains("multilinguarr_hevc_empty_header_total{instance=\"sonarr-fr\"} 1"),
+        "expected HEVC header counter with sonarr labels in:\n{render}"
+    );
+    assert!(fs::try_exists(
+        rig.primary_library
+            .join("Bare HEVC Show/Season 01/S01E01.mkv")
+    )
+    .await
+    .unwrap());
+}
+
+#[tokio::test]
+async fn radarr_import_with_healthy_hevc_header_does_not_count() {
+    let rig = Rig::new().await;
+    mount_radarr_source_movie(&rig.primary_server, "k1", 1).await;
+    let folder = rig.primary_storage.join("Good HEVC (2024)");
+    write_movie_file(&folder, "hevc-ok").await;
+    mount_radarr_lookup_empty(&rig.alt_server, "k2").await;
+    mount_radarr_quality_and_root(&rig.alt_server).await;
+    mount_radarr_add(&rig.alt_server).await;
+
+    let cfg = rig.config_radarr();
+    let primary = cfg.instances[0].clone();
+    let file_path = folder.join("movie.mkv");
+    let event = radarr_download_event(folder.to_str().unwrap(), file_path.to_str().unwrap());
+    let mut probe = empty_hevc_header_probe();
+    probe.hevc_header_bytes = Some(110);
+    let registry = Rig::registry(cfg, probe);
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    handle_radarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+
+    drop(recorder_guard);
+    let render = handle.render();
+    assert!(
+        !render.contains("multilinguarr_hevc_empty_header_total"),
+        "a healthy header must not count:\n{render}"
+    );
+}
 // =====================================================================
 // Wrong-language skip counter
 // =====================================================================

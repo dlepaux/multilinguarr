@@ -62,6 +62,11 @@ pub mod names {
     /// `kind` is [`crate::handler::HandlerError::kind`]. Exported at zero from
     /// startup by [`crate::handler::register_failure_counters`].
     pub const HANDLER_FAILURES: &str = "multilinguarr_handler_failures_total";
+    /// Counter — imports whose HEVC video carries no parameter sets in its
+    /// header, so Jellyfin direct play on Apple TV cannot start it.
+    /// Observe-only. Exported at zero from startup by
+    /// [`crate::handler::register_hevc_header_counters`].
+    pub const HEVC_EMPTY_HEADER: &str = "multilinguarr_hevc_empty_header_total";
 }
 
 /// DLQ gauge polling interval.
@@ -173,6 +178,10 @@ fn describe_all() {
     metrics::describe_counter!(
         names::AUDIO_SKIPPED,
         "Imports with no language-appropriate <=6ch non-commentary audio stream."
+    );
+    metrics::describe_counter!(
+        names::HEVC_EMPTY_HEADER,
+        "Imports whose HEVC video header carries no parameter sets."
     );
 }
 

@@ -18,7 +18,7 @@ use std::time::Duration;
 use crate::config::LanguagesConfig;
 
 pub use error::DetectionError;
-pub use ffprobe::{parse_streams_json, AudioStream, FfprobeProber, SystemFfprobe};
+pub use ffprobe::{parse_streams_json, AudioStream, FfprobeProber, ProbeReport, SystemFfprobe};
 
 /// Default per-call ffprobe timeout.
 pub const DEFAULT_FFPROBE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -34,6 +34,9 @@ pub struct DetectionResult {
     /// All audio streams ffprobe reported, retained so callers can apply
     /// the language/role/channel base-track rule for a target language.
     pub audio_streams: Vec<AudioStream>,
+    /// True when the file's HEVC video carries no parameter sets in its
+    /// header, so players that need them up front cannot start it.
+    pub has_empty_hevc_header: bool,
 }
 
 /// The detection engine. Cloneable — holds `Arc`s internally.
@@ -81,12 +84,13 @@ impl<P: FfprobeProber> LanguageDetector<P> {
             "outcome" => outcome,
         )
         .record(start.elapsed().as_secs_f64());
-        let streams = result?;
-        let languages = self.languages_from_streams(&streams);
+        let report = result?;
+        let languages = self.languages_from_streams(&report.audio_streams);
         Ok(DetectionResult {
             is_multi_audio: languages.len() >= 2,
             languages,
-            audio_streams: streams,
+            has_empty_hevc_header: report.has_empty_hevc_header(),
+            audio_streams: report.audio_streams,
         })
     }
 

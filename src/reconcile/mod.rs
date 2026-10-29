@@ -582,7 +582,9 @@ mod tests {
 
     use super::*;
     use crate::config::{InstanceConfig, InstanceKind, LinkStrategy};
-    use crate::detection::{AudioStream, DetectionError, FfprobeProber, LanguageDetector};
+    use crate::detection::{
+        AudioStream, DetectionError, FfprobeProber, LanguageDetector, ProbeReport,
+    };
     use crate::link::LinkManager;
 
     #[derive(Debug, Clone)]
@@ -593,9 +595,8 @@ mod tests {
             &self,
             _path: &Path,
             _timeout: Duration,
-        ) -> impl std::future::Future<Output = Result<Vec<AudioStream>, DetectionError>> + Send
-        {
-            std::future::ready(Ok(self.0.clone()))
+        ) -> impl std::future::Future<Output = Result<ProbeReport, DetectionError>> + Send {
+            std::future::ready(Ok(self.0.clone().into()))
         }
     }
 
@@ -1060,6 +1061,7 @@ mod tests {
             languages: HashSet::from(["fr".to_owned(), "en".to_owned()]),
             is_multi_audio: true,
             audio_streams: vec![],
+            has_empty_hevc_header: false,
         };
 
         let all = vec![inst_fr.clone(), inst_en.clone(), inst_sonarr];
@@ -1085,6 +1087,7 @@ mod tests {
             languages: HashSet::from(["fr".to_owned()]),
             is_multi_audio: false,
             audio_streams: vec![],
+            has_empty_hevc_header: false,
         };
 
         let all = vec![inst_fr.clone(), inst_en];

@@ -133,6 +133,9 @@ pub async fn build(bootstrap: Bootstrap) -> Result<App, Box<dyn std::error::Erro
     // recorder and the first scrape is empty.
     let metrics_handle = observability::install();
     crate::handler::register_failure_counters();
+    if let Some(ref config) = config {
+        crate::handler::register_hevc_header_counters(&config.instances);
+    }
     let dlq_tick = observability::spawn_dlq_tick(db.pool().clone(), cancel.clone());
 
     // Combined router
@@ -278,6 +281,7 @@ pub async fn build_test(config: Config) -> Result<App, Box<dyn std::error::Error
 
     let metrics_handle = observability::install();
     crate::handler::register_failure_counters();
+    crate::handler::register_hevc_header_counters(&config.instances);
     let dlq_tick = observability::spawn_dlq_tick(db.pool().clone(), cancel.clone());
 
     let repo = ConfigRepo::new(db.pool().clone());

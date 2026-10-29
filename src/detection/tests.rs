@@ -13,7 +13,7 @@ use crate::config::{LanguageDefinition, LanguagesConfig};
 use super::{
     error::DetectionError,
     ffprobe::{AudioStream, FfprobeProber},
-    parse_streams_json, LanguageDetector,
+    parse_streams_json, LanguageDetector, ProbeReport,
 };
 
 // ---------- fixtures ----------
@@ -63,9 +63,9 @@ impl FfprobeProber for StubFfprobe {
         &self,
         _path: &Path,
         _timeout: Duration,
-    ) -> impl std::future::Future<Output = Result<Vec<AudioStream>, DetectionError>> + Send {
+    ) -> impl std::future::Future<Output = Result<ProbeReport, DetectionError>> + Send {
         std::future::ready(match &self.response {
-            Ok(v) => Ok(v.clone()),
+            Ok(v) => Ok(v.clone().into()),
             Err(_) => Err(DetectionError::FfprobeUnavailable),
         })
     }
@@ -253,13 +253,13 @@ async fn base_track_rule_is_language_role_and_channel_aware() {
 #[test]
 fn parse_streams_empty_envelope() {
     let out = parse_streams_json(r#"{"streams":[]}"#).unwrap();
-    assert!(out.is_empty());
+    assert!(out.audio_streams.is_empty());
 }
 
 #[test]
 fn parse_streams_missing_streams_field_defaults_to_empty() {
     let out = parse_streams_json(r"{}").unwrap();
-    assert!(out.is_empty());
+    assert!(out.audio_streams.is_empty());
 }
 
 #[test]
@@ -271,17 +271,17 @@ fn parse_streams_with_language_tags() {
         ]
     }"#;
     let out = parse_streams_json(json).unwrap();
-    assert_eq!(out.len(), 2);
-    assert_eq!(out[0].language.as_deref(), Some("eng"));
-    assert_eq!(out[1].language.as_deref(), Some("fra"));
+    assert_eq!(out.audio_streams.len(), 2);
+    assert_eq!(out.audio_streams[0].language.as_deref(), Some("eng"));
+    assert_eq!(out.audio_streams[1].language.as_deref(), Some("fra"));
 }
 
 #[test]
 fn parse_streams_missing_tags_yields_none_language() {
     let json = r#"{"streams": [{ "codec_type": "audio" }]}"#;
     let out = parse_streams_json(json).unwrap();
-    assert_eq!(out.len(), 1);
-    assert!(out[0].language.is_none());
+    assert_eq!(out.audio_streams.len(), 1);
+    assert!(out.audio_streams[0].language.is_none());
 }
 
 #[test]
@@ -293,29 +293,72 @@ fn parse_streams_invalid_json_errors() {
 fn parse_streams_captures_channels_and_disposition_commentary() {
     let json = r#"{
         "streams": [
-            { "channels": 8, "disposition": { "comment": 0, "visual_impaired": 0 }, "tags": { "language": "eng" } },
-            { "channels": 2, "disposition": { "comment": 1, "visual_impaired": 0 }, "tags": { "language": "eng", "title": "Director's Track" } },
-            { "channels": 6, "tags": { "language": "fre" } }
+            { "codec_type": "audio", "channels": 8, "disposition": { "comment": 0, "visual_impaired": 0 }, "tags": { "language": "eng" } },
+            { "codec_type": "audio", "channels": 2, "disposition": { "comment": 1, "visual_impaired": 0 }, "tags": { "language": "eng", "title": "Director's Track" } },
+            { "codec_type": "audio", "channels": 6, "tags": { "language": "fre" } }
         ]
     }"#;
     let out = parse_streams_json(json).unwrap();
-    assert_eq!(out[0].channels, Some(8));
-    assert!(!out[0].is_commentary);
-    assert_eq!(out[1].channels, Some(2));
-    assert!(out[1].is_commentary); // disposition.comment == 1
-    assert_eq!(out[2].channels, Some(6));
-    assert!(!out[2].is_commentary); // missing disposition tolerated
+    assert_eq!(out.audio_streams[0].channels, Some(8));
+    assert!(!out.audio_streams[0].is_commentary);
+    assert_eq!(out.audio_streams[1].channels, Some(2));
+    assert!(out.audio_streams[1].is_commentary); // disposition.comment == 1
+    assert_eq!(out.audio_streams[2].channels, Some(6));
+    assert!(!out.audio_streams[2].is_commentary); // missing disposition tolerated
 }
 
 #[test]
 fn parse_streams_commentary_detected_by_title() {
     let json = r#"{"streams":[
-        { "channels": 2, "tags": { "language": "eng", "title": "Audio Commentary" } },
-        { "channels": 2, "tags": { "language": "eng", "title": "Visually Impaired" } },
-        { "channels": 2, "tags": { "language": "eng", "title": "Stereo" } }
+        { "codec_type": "audio", "channels": 2, "tags": { "language": "eng", "title": "Audio Commentary" } },
+        { "codec_type": "audio", "channels": 2, "tags": { "language": "eng", "title": "Visually Impaired" } },
+        { "codec_type": "audio", "channels": 2, "tags": { "language": "eng", "title": "Stereo" } }
     ]}"#;
     let out = parse_streams_json(json).unwrap();
-    assert!(out[0].is_commentary); // "commentary" in title
-    assert!(out[1].is_commentary); // "visually impaired" in title
-    assert!(!out[2].is_commentary);
+    assert!(out.audio_streams[0].is_commentary); // "commentary" in title
+    assert!(out.audio_streams[1].is_commentary); // "visually impaired" in title
+    assert!(!out.audio_streams[2].is_commentary);
+}
+
+#[test]
+fn parse_streams_keeps_only_audio_streams() {
+    let json = r#"{"streams":[
+        { "codec_type": "video", "codec_name": "hevc", "extradata_size": 110, "tags": { "language": "eng" } },
+        { "codec_type": "audio", "channels": 6, "tags": { "language": "fre" } },
+        { "codec_type": "subtitle", "tags": { "language": "eng" } }
+    ]}"#;
+    let out = parse_streams_json(json).unwrap();
+    assert_eq!(out.audio_streams.len(), 1);
+    assert_eq!(out.audio_streams[0].language.as_deref(), Some("fre"));
+}
+
+#[test]
+fn parse_streams_reports_the_hevc_header_size() {
+    let json = r#"{"streams":[
+        { "codec_type": "video", "codec_name": "hevc", "extradata_size": 23 },
+        { "codec_type": "audio", "channels": 2 }
+    ]}"#;
+    let out = parse_streams_json(json).unwrap();
+    assert_eq!(out.hevc_header_bytes, Some(23));
+}
+
+#[test]
+fn parse_streams_reports_no_hevc_header_for_other_codecs() {
+    let json = r#"{"streams":[
+        { "codec_type": "video", "codec_name": "h264", "extradata_size": 23 },
+        { "codec_type": "video", "codec_name": "mjpeg", "disposition": { "attached_pic": 1 } }
+    ]}"#;
+    let out = parse_streams_json(json).unwrap();
+    assert_eq!(out.hevc_header_bytes, None);
+}
+
+#[test]
+fn hevc_header_is_empty_below_a_parameter_set() {
+    let report = |bytes| ProbeReport {
+        audio_streams: vec![],
+        hevc_header_bytes: bytes,
+    };
+    assert!(report(Some(23)).has_empty_hevc_header());
+    assert!(!report(Some(110)).has_empty_hevc_header());
+    assert!(!report(None).has_empty_hevc_header());
 }
