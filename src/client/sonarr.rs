@@ -58,6 +58,17 @@ pub struct SonarrSeries {
     /// The series' original language, in this Sonarr's language ids.
     #[serde(default)]
     pub original_language: Option<Language>,
+    /// Absent when Sonarr leaves it out; the delete cascade then cannot
+    /// prove the series holds no files of its own.
+    #[serde(default)]
+    pub statistics: Option<SeriesStatistics>,
+}
+
+/// The part of a series' `statistics` the delete cascade reads.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesStatistics {
+    pub episode_file_count: u32,
 }
 
 /// Payload for `POST /api/v3/series`.

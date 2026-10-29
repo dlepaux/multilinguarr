@@ -288,14 +288,19 @@ async fn mount_radarr_lookup_empty(server: &MockServer, api_key: &str) {
         .await;
 }
 
-async fn mount_radarr_lookup_existing(server: &MockServer, api_key: &str, internal_id: u32) {
+async fn mount_radarr_lookup_existing(
+    server: &MockServer,
+    api_key: &str,
+    internal_id: u32,
+    has_file: bool,
+) {
     let body = json!([{
         "id": internal_id,
         "title": "Test Movie",
         "year": 2024,
         "tmdbId": 42,
         "qualityProfileId": 1,
-        "hasFile": true
+        "hasFile": has_file
     }]);
     Mock::given(method("GET"))
         .and(path("/api/v3/movie"))
@@ -334,10 +339,13 @@ async fn mount_radarr_add(server: &MockServer) {
         .await;
 }
 
-async fn mount_radarr_delete(server: &MockServer, internal_id: u32) {
+/// Mount the cascade's DELETE, expected exactly `times` times: wiremock
+/// verifies the count when the server drops at the end of the test.
+async fn mount_radarr_delete(server: &MockServer, internal_id: u32, times: u64) {
     Mock::given(method("DELETE"))
         .and(path(format!("/api/v3/movie/{internal_id}")))
         .respond_with(ResponseTemplate::new(200))
+        .expect(times)
         .mount(server)
         .await;
 }
@@ -1046,8 +1054,10 @@ async fn radarr_primary_movie_delete_unlinks_both_libraries_and_propagates() {
 
     // Now exercise the delete path: alt instance must be queried for
     // its internal id and DELETE issued.
-    mount_radarr_lookup_existing(&rig.alt_server, "k2", 555).await;
-    mount_radarr_delete(&rig.alt_server, 555).await;
+    // The alternate's record holds no file of its own (it was added
+    // by the cascade), so the delete propagates.
+    mount_radarr_lookup_existing(&rig.alt_server, "k2", 555, false).await;
+    mount_radarr_delete(&rig.alt_server, 555, 1).await;
 
     handle_radarr_movie_delete(
         &primary,
@@ -1179,16 +1189,11 @@ async fn storage_aware_alternate_link_to_foreign_storage_is_preserved_on_alt_del
     let alternate = cfg.instances[1].clone();
     let registry = Rig::registry(cfg, multi_audio_streams());
 
-    // Now alt-instance issues a delete for content "in its own
-    // storage". The link in alt library actually resolves into the
-    // primary's storage, but `unlink_movie_local_only` (alternate
-    // path) still removes its own library entry — that is local
-    // semantics. The point of storage-awareness is on the *primary*
-    // delete, not the alt delete.
-    //
-    // The fs entry pointing into foreign storage is alt's to remove
-    // because the webhook event came from alt. The primary library
-    // (which would have its own copy) is never touched.
+    // Now the alternate issues a delete. The link in its library
+    // resolves into the primary's storage: it serves the primary's
+    // file, so it is not the alternate's to remove. An instance only
+    // deletes what lives in its own storage, and `regenerate` cannot
+    // rebuild a hand-placed fallback link once it is gone (MED-2).
     let primary_lib_before = rig.primary_library.join(folder_name);
     handle_radarr_movie_delete(
         &alternate,
@@ -1202,6 +1207,12 @@ async fn storage_aware_alternate_link_to_foreign_storage_is_preserved_on_alt_del
     assert!(!fs::try_exists(&primary_lib_before).await.unwrap());
     // Source content under primary storage — untouched.
     assert!(fs::try_exists(folder.join("movie.mkv")).await.unwrap());
+    // The alternate's link into foreign storage survives its delete.
+    assert!(
+        fs::try_exists(rig.alt_library.join(folder_name).join("movie.mkv"))
+            .await
+            .unwrap()
+    );
 }
 
 // ----- cross_instance::propagate_add_movie via primary single-language import -----
@@ -1309,7 +1320,7 @@ async fn radarr_primary_single_language_skips_add_when_target_already_has_movie(
 
     // Dedup check: alternate ALREADY has the movie. No add call mounted —
     // an unexpected POST would surface in wiremock as an unmatched request.
-    mount_radarr_lookup_existing(&rig.alt_server, "k2", 999).await;
+    mount_radarr_lookup_existing(&rig.alt_server, "k2", 999, true).await;
 
     let cfg = rig.config_radarr();
     let primary = cfg.instances[0].clone();
@@ -1382,27 +1393,8 @@ async fn sonarr_primary_series_delete_clears_both_libraries() {
     assert!(fs::try_exists(rig.alt_library.join(rel)).await.unwrap());
 
     // Series delete: alt instance gets a series-lookup + delete call.
-    let series_body = json!([{
-        "id": 7,
-        "title": "Show",
-        "tvdbId": 81189,
-        "qualityProfileId": 1,
-        "seasonFolder": true,
-        "monitored": true,
-        "seasons": []
-    }]);
-    Mock::given(method("GET"))
-        .and(path("/api/v3/series"))
-        .and(query_param("tvdbId", "81189"))
-        .and(header("X-Api-Key", "k2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(series_body))
-        .mount(&rig.alt_server)
-        .await;
-    Mock::given(method("DELETE"))
-        .and(path("/api/v3/series/7"))
-        .respond_with(ResponseTemplate::new(200))
-        .mount(&rig.alt_server)
-        .await;
+    // The alternate's series holds no episode file of its own.
+    mount_sonarr_series_on_alt(&rig.alt_server, 0, 1).await;
 
     handle_sonarr_series_delete(
         &primary,
@@ -2366,5 +2358,253 @@ async fn radarr_primary_links_every_library_even_when_one_target_fails() {
             .await
             .unwrap(),
         "the French link is made even though English failed first"
+    );
+}
+
+// ----- MED-2: a delete never destroys what a sibling owns -----
+
+/// The alternate's Sonarr record for tvdb 81189, holding
+/// `episode_file_count` files of its own, and its DELETE expected
+/// exactly `delete_times` times.
+async fn mount_sonarr_series_on_alt(
+    server: &MockServer,
+    episode_file_count: u32,
+    delete_times: u64,
+) {
+    let series_body = json!([{
+        "id": 7,
+        "title": "Show",
+        "tvdbId": 81189,
+        "qualityProfileId": 1,
+        "seasonFolder": true,
+        "monitored": true,
+        "seasons": [],
+        "statistics": { "episodeFileCount": episode_file_count }
+    }]);
+    Mock::given(method("GET"))
+        .and(path("/api/v3/series"))
+        .and(query_param("tvdbId", "81189"))
+        .and(header("X-Api-Key", "k2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(series_body))
+        .mount(server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v3/series/7"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(delete_times)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn primary_movie_delete_spares_a_sibling_that_holds_its_own_file() {
+    let rig = Rig::new().await;
+    let folder_name = "Both (2024)";
+    let fr_folder = rig.primary_storage.join(folder_name);
+    let en_folder = rig.alt_storage.join(folder_name);
+    write_movie_file(&fr_folder, "fr").await;
+    write_movie_file(&en_folder, "en").await;
+
+    let cfg = rig.config_radarr();
+    let primary = cfg.instances[0].clone();
+    crate::link::LinkManager::from_instance(&cfg.instances[0])
+        .link_movie_from(&fr_folder, folder_name)
+        .await
+        .unwrap();
+    crate::link::LinkManager::from_instance(&cfg.instances[1])
+        .link_movie_from(&en_folder, folder_name)
+        .await
+        .unwrap();
+    let registry = Rig::registry(cfg, multi_audio_streams());
+
+    // radarr-en grabbed its own copy: the record is not the cascade's.
+    mount_radarr_lookup_existing(&rig.alt_server, "k2", 555, true).await;
+    mount_radarr_delete(&rig.alt_server, 555, 0).await;
+
+    handle_radarr_movie_delete(
+        &primary,
+        &radarr_movie_delete_event(true, fr_folder.to_str().unwrap()),
+        &registry,
+    )
+    .await
+    .unwrap();
+
+    assert!(!fs::try_exists(rig.primary_library.join(folder_name))
+        .await
+        .unwrap());
+    assert!(fs::try_exists(en_folder.join("movie.mkv")).await.unwrap());
+    assert!(
+        fs::try_exists(rig.alt_library.join(folder_name).join("movie.mkv"))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn primary_series_delete_spares_a_sibling_that_holds_its_own_episodes() {
+    let rig = Rig::new().await;
+    let series_dir = rig.primary_storage.join("Show");
+    write_episode_file(&series_dir, "ep").await;
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    let registry = Rig::registry(cfg, multi_audio_streams());
+
+    mount_sonarr_series_on_alt(&rig.alt_server, 3, 0).await;
+
+    handle_sonarr_series_delete(
+        &primary,
+        &sonarr_series_delete_event(true, series_dir.to_str().unwrap()),
+        &registry,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn primary_series_delete_spares_a_sibling_whose_file_count_is_unknown() {
+    // A record without `statistics` cannot prove it owns nothing, so
+    // the cascade leaves it alone rather than guess.
+    let rig = Rig::new().await;
+    let series_dir = rig.primary_storage.join("Show");
+    write_episode_file(&series_dir, "ep").await;
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    let registry = Rig::registry(cfg, multi_audio_streams());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v3/series"))
+        .and(query_param("tvdbId", "81189"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "id": 7, "title": "Show", "tvdbId": 81189, "qualityProfileId": 1,
+            "seasonFolder": true, "monitored": true, "seasons": []
+        }])))
+        .mount(&rig.alt_server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v3/series/7"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&rig.alt_server)
+        .await;
+
+    handle_sonarr_series_delete(
+        &primary,
+        &sonarr_series_delete_event(true, series_dir.to_str().unwrap()),
+        &registry,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn alternate_series_delete_keeps_links_into_foreign_storage() {
+    let rig = Rig::new().await;
+    let fr_series = rig.primary_storage.join("Show");
+    write_episode_file(&fr_series, "fr").await;
+    let cfg = rig.config_sonarr();
+    let alternate = cfg.instances[1].clone();
+    crate::link::LinkManager::from_instance(&cfg.instances[1])
+        .link_episode_from(
+            &fr_series.join("Season 01/S01E01.mkv"),
+            Path::new("Show/Season 01/S01E01.mkv"),
+        )
+        .await
+        .unwrap();
+    let registry = Rig::registry(cfg, multi_audio_streams());
+
+    handle_sonarr_series_delete(
+        &alternate,
+        &sonarr_series_delete_event(true, rig.alt_storage.join("Show").to_str().unwrap()),
+        &registry,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        fs::try_exists(rig.alt_library.join("Show/Season 01/S01E01.mkv"))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn alternate_episode_delete_keeps_a_link_into_foreign_storage() {
+    let rig = Rig::new().await;
+    let fr_series = rig.primary_storage.join("Show");
+    write_episode_file(&fr_series, "fr").await;
+    let cfg = rig.config_sonarr();
+    let alternate = cfg.instances[1].clone();
+    crate::link::LinkManager::from_instance(&cfg.instances[1])
+        .link_episode_from(
+            &fr_series.join("Season 01/S01E01.mkv"),
+            Path::new("Show/Season 01/S01E01.mkv"),
+        )
+        .await
+        .unwrap();
+    let registry = Rig::registry(cfg, multi_audio_streams());
+
+    handle_sonarr_episode_file_delete(
+        &alternate,
+        &sonarr_episode_file_delete_event(
+            rig.alt_storage.join("Show").to_str().unwrap(),
+            "Season 01/S01E01.mkv",
+        ),
+        &registry,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        fs::try_exists(rig.alt_library.join("Show/Season 01/S01E01.mkv"))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn alternate_series_delete_removes_its_own_links_and_keeps_foreign_ones() {
+    let rig = Rig::new().await;
+    let fr_series = rig.primary_storage.join("Show");
+    let en_series = rig.alt_storage.join("Show");
+    write_episode_file(&fr_series, "fr").await;
+    fs::create_dir_all(en_series.join("Season 01"))
+        .await
+        .unwrap();
+    fs::write(en_series.join("Season 01/S01E02.mkv"), "en")
+        .await
+        .unwrap();
+    let cfg = rig.config_sonarr();
+    let alternate = cfg.instances[1].clone();
+    let alt_mgr = crate::link::LinkManager::from_instance(&cfg.instances[1]);
+    alt_mgr
+        .link_episode_from(
+            &fr_series.join("Season 01/S01E01.mkv"),
+            Path::new("Show/Season 01/S01E01.mkv"),
+        )
+        .await
+        .unwrap();
+    alt_mgr
+        .link_episode(Path::new("Show/Season 01/S01E02.mkv"))
+        .await
+        .unwrap();
+    let registry = Rig::registry(cfg, multi_audio_streams());
+
+    handle_sonarr_series_delete(
+        &alternate,
+        &sonarr_series_delete_event(true, en_series.to_str().unwrap()),
+        &registry,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        fs::try_exists(rig.alt_library.join("Show/Season 01/S01E01.mkv"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !fs::try_exists(rig.alt_library.join("Show/Season 01/S01E02.mkv"))
+            .await
+            .unwrap()
     );
 }

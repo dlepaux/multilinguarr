@@ -14,8 +14,11 @@
 //!      instance and must not be touched.
 //!    - Hardlink instances: refuse to remove the last hardlink
 //!      (`is_last_hardlink == true`), which would orphan the file.
+//!    Alternate deletes follow the same ownership rule in their own
+//!    library: a link into another instance's storage is kept.
 //! 4. For primary instances, propagate the delete to other instances
-//!    via the arr API (08b `cross_instance` helpers).
+//!    via the arr API (08b `cross_instance` helpers), skipping any
+//!    sibling record that holds files of its own.
 //! 5. Trigger a Jellyfin refresh.
 
 use std::path::{Path, PathBuf};
@@ -66,7 +69,12 @@ pub async fn handle_radarr_movie_delete<P: FfprobeProber>(
             // Alternate delete: only this instance's library, never
             // propagate, never touch the primary library.
             let mgr = registry.link_manager(&instance.name)?;
-            unlink_movie_local_only(mgr, &folder_name).await?;
+            unlink_movie_local_only(
+                mgr,
+                &foreign_storage_roots(registry, instance),
+                &folder_name,
+            )
+            .await?;
         }
 
         registry.jellyfin.refresh().await;
@@ -106,7 +114,12 @@ pub async fn handle_radarr_movie_file_delete<P: FfprobeProber>(
             // instance still owns its own copy independently.
         } else {
             let mgr = registry.link_manager(&instance.name)?;
-            unlink_movie_local_only(mgr, &folder_name).await?;
+            unlink_movie_local_only(
+                mgr,
+                &foreign_storage_roots(registry, instance),
+                &folder_name,
+            )
+            .await?;
         }
 
         registry.jellyfin.refresh().await;
@@ -148,7 +161,12 @@ pub async fn handle_sonarr_series_delete<P: FfprobeProber>(
             propagate_delete_series(registry, instance, series_ref.tvdb_id, true).await?;
         } else {
             let mgr = registry.link_manager(&instance.name)?;
-            unlink_series_local_only(mgr, &folder_name).await?;
+            unlink_series_local_only(
+                mgr,
+                &foreign_storage_roots(registry, instance),
+                &folder_name,
+            )
+            .await?;
         }
 
         registry.jellyfin.refresh().await;
@@ -195,7 +213,8 @@ pub async fn handle_sonarr_episode_file_delete<P: FfprobeProber>(
             // Same rationale as MovieFileDelete: do not propagate.
         } else {
             let mgr = registry.link_manager(&instance.name)?;
-            unlink_episode_local_only(mgr, &relative).await?;
+            unlink_episode_local_only(mgr, &foreign_storage_roots(registry, instance), &relative)
+                .await?;
         }
 
         registry.jellyfin.refresh().await;
@@ -238,9 +257,33 @@ async fn unlink_movie_everywhere_owned_by<P: FfprobeProber>(
     Ok(())
 }
 
-async fn unlink_movie_local_only(mgr: &LinkManager, folder_name: &str) -> Result<(), HandlerError> {
-    mgr.unlink_folder(folder_name).await?;
-    info!("alternate movie delete — local library entry removed");
+/// Every other instance's storage root. An alternate delete keeps the
+/// links that resolve into these: they serve another instance's file,
+/// and `regenerate` cannot rebuild a hand-placed fallback link (MED-2).
+fn foreign_storage_roots<P: FfprobeProber>(
+    registry: &HandlerRegistry<P>,
+    instance: &InstanceConfig,
+) -> Vec<PathBuf> {
+    registry
+        .config_instances()
+        .iter()
+        .filter(|other| other.name != instance.name)
+        .map(|other| other.storage_path.clone())
+        .collect()
+}
+
+async fn unlink_movie_local_only(
+    mgr: &LinkManager,
+    foreign_roots: &[PathBuf],
+    folder_name: &str,
+) -> Result<(), HandlerError> {
+    let kept = mgr
+        .unlink_folder_keeping(folder_name, foreign_roots)
+        .await?;
+    info!(
+        kept,
+        "alternate movie delete — own library entry removed, foreign links kept"
+    );
     Ok(())
 }
 
@@ -260,10 +303,16 @@ async fn unlink_series_everywhere_owned_by<P: FfprobeProber>(
 
 async fn unlink_series_local_only(
     mgr: &LinkManager,
+    foreign_roots: &[PathBuf],
     folder_name: &str,
 ) -> Result<(), HandlerError> {
-    mgr.unlink_folder(folder_name).await?;
-    info!("alternate series delete — local library tree removed");
+    let kept = mgr
+        .unlink_folder_keeping(folder_name, foreign_roots)
+        .await?;
+    info!(
+        kept,
+        "alternate series delete — own links removed, foreign links kept"
+    );
     Ok(())
 }
 
@@ -281,7 +330,17 @@ async fn unlink_episode_everywhere_owned_by<P: FfprobeProber>(
     Ok(())
 }
 
-async fn unlink_episode_local_only(mgr: &LinkManager, relative: &Path) -> Result<(), HandlerError> {
+async fn unlink_episode_local_only(
+    mgr: &LinkManager,
+    foreign_roots: &[PathBuf],
+    relative: &Path,
+) -> Result<(), HandlerError> {
+    for root in foreign_roots {
+        if mgr.resolves_into(relative, root).await? {
+            info!("alternate episode delete — link serves another instance's file, kept");
+            return Ok(());
+        }
+    }
     mgr.unlink_episode(relative).await?;
     info!("alternate episode delete — local link removed");
     Ok(())

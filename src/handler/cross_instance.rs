@@ -386,6 +386,16 @@ pub async fn propagate_delete_movie<P: FfprobeProber>(
             );
             continue;
         };
+        // A sibling holding a file grabbed it itself: the title is its
+        // own, and the cascade would destroy that file (MED-2).
+        if existing.has_file {
+            info!(
+                target = %target.name,
+                tmdb_id,
+                "target holds its own file — leaving its record and file in place"
+            );
+            continue;
+        }
         target_radarr
             .delete_movie(existing.id, delete_files)
             .await?;
@@ -435,6 +445,18 @@ pub async fn propagate_delete_series<P: FfprobeProber>(
             );
             continue;
         };
+        // Same ownership rule as movies. Without statistics the record
+        // cannot prove it owns nothing, so it is left alone.
+        let own_files = existing.statistics.as_ref().map(|s| s.episode_file_count);
+        if own_files != Some(0) {
+            info!(
+                target = %target.name,
+                tvdb_id,
+                own_files = ?own_files,
+                "target may hold its own episode files — leaving its record and files in place"
+            );
+            continue;
+        }
         target_sonarr
             .delete_series(existing.id, delete_files)
             .await?;

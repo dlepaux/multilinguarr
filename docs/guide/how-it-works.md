@@ -57,6 +57,13 @@ When a primary instance (e.g., Radarr-FR) imports a single-language file:
 
 This ensures each instance has its own file — no shared storage between instances.
 
+## Deletes
+
+An instance only deletes what lives in its own storage.
+
+- **Primary delete.** The title's links go from every library whose link resolves into the primary's storage. The delete then propagates to the alternate instances, but only to a record that holds no file of its own: a Radarr movie with `hasFile: false`, or a Sonarr series whose `statistics.episodeFileCount` is 0. A sibling that grabbed its own copy keeps its record and its file. So does a Sonarr record that reports no statistics, since it cannot prove it owns nothing.
+- **Alternate delete.** Only the alternate's own library changes, and nothing propagates. Within that library, a link that resolves into another instance's storage is kept: it serves that instance's file, and regeneration cannot rebuild a hand-placed fallback link.
+
 ## Regeneration
 
 `POST /api/v1/admin/regenerate` walks all storage directories, runs ffprobe on every file, and rebuilds the entire link tree. Use this:
