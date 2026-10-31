@@ -13,7 +13,7 @@
   },
   "devDependencies": {
     "@scalar/api-reference": "^1.51.0",
-    "@types/node": "^25.5.2",
+    "@types/node": "^26.0.0",
     "sharp": "^0.35.0",
     "tsx": "^4.21.0",
     "vitepress": "^1.6.4",
