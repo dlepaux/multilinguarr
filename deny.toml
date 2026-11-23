@@ -1,7 +1,13 @@
 [advisories]
-# paste is unmaintained (RUSTSEC-2024-0436) but it's a transitive dep
-# from utoipa-axum — no action we can take until upstream migrates.
-ignore = ["RUSTSEC-2024-0436"]
+# Each ignore is declared debt with a card that removes it.
+ignore = [
+    # chrono is unmaintained, no fixed release; direct and through sqlx's
+    # `chrono` feature. Moving both to `time` is MED-79.
+    "RUSTSEC-2026-0543",
+    # astral-tokio-tar is unmaintained, no fixed release; dev-only, through
+    # testcontainers for the e2e tests, never in the binary. MED-80.
+    "RUSTSEC-2026-0440",
+]
 
 [licenses]
 allow = [
