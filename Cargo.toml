@@ -1,6 +1,6 @@
 [package]
 name = "multilinguarr"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
 rust-version = "1.99"
 description = "Enforces multi-language audio in the *arr media stack via symlinks/hardlinks and Jellyfin library routing"

@@ -1,3 +1,11 @@
+## [1.4.1](https://github.com/dlepaux/multilinguarr/compare/v1.4.0...v1.4.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **deps:** take the SQLite and url advisory fixes, declare the two without one ([89feaba](https://github.com/dlepaux/multilinguarr/commit/89feaba6c7a956aa3375ff5ad7ee8207cd398717))
+* **detection:** read ffprobe tag keys case-insensitively ([829f5e5](https://github.com/dlepaux/multilinguarr/commit/829f5e5dce4684bc21d3b775704c31a027ce4080))
+
 # [1.4.0](https://github.com/dlepaux/multilinguarr/compare/v1.3.7...v1.4.0) (2026-10-29)
 
 
