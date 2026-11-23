@@ -277,6 +277,40 @@ fn parse_streams_with_language_tags() {
 }
 
 #[test]
+fn parse_streams_reads_uppercase_tag_keys() {
+    // Death Proof (2007), Radarr-FR, read live 2026-11-23 (MED-77): ffprobe passes Matroska tag
+    // names through with their case, so the language arrived as `LANGUAGE` and was dropped.
+    let json = r#"{
+        "streams": [
+            { "codec_type": "audio", "channels": 6, "tags": { "title": "Surround", "LANGUAGE": "fre" } },
+            { "codec_type": "audio", "channels": 6, "tags": { "title": "Surround", "LANGUAGE": "eng" } },
+            { "codec_type": "audio", "tags": { "Language": "eng", "TITLE": "Commentary" } }
+        ]
+    }"#;
+    let out = parse_streams_json(json).unwrap();
+    assert_eq!(out.audio_streams[0].language.as_deref(), Some("fre"));
+    assert_eq!(out.audio_streams[1].language.as_deref(), Some("eng"));
+    assert!(!out.audio_streams[1].is_commentary);
+    assert_eq!(out.audio_streams[2].language.as_deref(), Some("eng"));
+    assert!(out.audio_streams[2].is_commentary); // the title is read whatever its key's case
+}
+
+#[test]
+fn parse_streams_prefers_the_lowercase_key_when_both_cases_exist() {
+    let json = r#"{"streams":[{ "codec_type": "audio", "tags": { "LANGUAGE": "eng", "language": "fre" } }]}"#;
+    let out = parse_streams_json(json).unwrap();
+    assert_eq!(out.audio_streams[0].language.as_deref(), Some("fre"));
+}
+
+#[test]
+fn parse_streams_ignores_a_tag_that_is_not_text() {
+    let json =
+        r#"{"streams":[{ "codec_type": "audio", "tags": { "BPS": 640000, "LANGUAGE": "fre" } }]}"#;
+    let out = parse_streams_json(json).unwrap();
+    assert_eq!(out.audio_streams[0].language.as_deref(), Some("fre"));
+}
+
+#[test]
 fn parse_streams_missing_tags_yields_none_language() {
     let json = r#"{"streams": [{ "codec_type": "audio" }]}"#;
     let out = parse_streams_json(json).unwrap();

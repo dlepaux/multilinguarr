@@ -250,12 +250,34 @@ struct FfprobeDisposition {
     visual_impaired: Option<u8>,
 }
 
-#[derive(Debug, Deserialize)]
+/// The stream tags detection reads. ffprobe passes container tag names
+/// through with their case, and some muxers write Matroska tags as
+/// `LANGUAGE` or `TITLE` (Death Proof, MED-77), so keys match
+/// case-insensitively; the exact lowercase key wins when both exist.
+#[derive(Debug)]
 struct FfprobeTags {
-    #[serde(default)]
     language: Option<String>,
-    #[serde(default)]
     title: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for FfprobeTags {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Values as JSON, so a tag detection does not read can never fail the parse.
+        let raw =
+            std::collections::HashMap::<String, serde_json::Value>::deserialize(deserializer)?;
+        let text = |v: &serde_json::Value| v.as_str().map(str::to_owned);
+        let lookup = |key: &str| {
+            raw.get(key).and_then(text).or_else(|| {
+                raw.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                    .and_then(|(_, v)| text(v))
+            })
+        };
+        Ok(Self {
+            language: lookup("language"),
+            title: lookup("title"),
+        })
+    }
 }
 
 /// Minimal `which` replacement — a 15-line PATH scan, no `which` crate.
