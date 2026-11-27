@@ -1,3 +1,10 @@
+## [1.4.3](https://github.com/dlepaux/multilinguarr/compare/v1.4.2...v1.4.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* **cross-instance:** retry-safe season sync, and leave a tombstoned series alone (MED-83) ([2649735](https://github.com/dlepaux/multilinguarr/commit/2649735f1f1b302914bbd57d955d9e41d73a4961))
+
 ## [1.4.2](https://github.com/dlepaux/multilinguarr/compare/v1.4.1...v1.4.2) (2026-11-27)
 
 
