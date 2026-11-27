@@ -1,3 +1,11 @@
+## [1.4.2](https://github.com/dlepaux/multilinguarr/compare/v1.4.1...v1.4.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* **cross-instance:** monitor and search the imported season a sibling already holding the series lacks (MED-83) ([0bc972f](https://github.com/dlepaux/multilinguarr/commit/0bc972f14c21b3e9f36dc51be6b1bb6842a1aeef))
+* **reconcile:** name each file regenerate skips, and why (MED-82) ([ce6f845](https://github.com/dlepaux/multilinguarr/commit/ce6f845bd7631cbac7b8b27a6f80425469a20700))
+
 ## [1.4.1](https://github.com/dlepaux/multilinguarr/compare/v1.4.0...v1.4.1) (2026-11-23)
 
 
