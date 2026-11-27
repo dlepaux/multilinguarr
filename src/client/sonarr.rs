@@ -36,6 +36,16 @@ pub struct EpisodeFile {
 pub struct SeasonInfo {
     pub season_number: u32,
     pub monitored: bool,
+    /// Read from Sonarr, never sent: an add request carries the flag only.
+    #[serde(default, skip_serializing)]
+    pub statistics: Option<SeasonStatistics>,
+}
+
+/// The part of a season's `statistics` the cross-instance add reads.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeasonStatistics {
+    pub episode_file_count: u32,
 }
 
 /// A full series record as returned by Sonarr.
@@ -223,6 +233,18 @@ impl SonarrClient {
             "seriesId": series_id,
             "seasonNumber": season_number,
         });
+        let _: serde_json::Value = self.http.post_json(PATH_COMMAND, &body).await?;
+        Ok(())
+    }
+
+    /// Ask Sonarr to refresh a series from its metadata source, which lists
+    /// any season it did not know yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ArrError` on network, HTTP, or deserialization failure.
+    pub async fn refresh_series(&self, series_id: u32) -> Result<(), ArrError> {
+        let body = serde_json::json!({ "name": "RefreshSeries", "seriesId": series_id });
         let _: serde_json::Value = self.http.post_json(PATH_COMMAND, &body).await?;
         Ok(())
     }

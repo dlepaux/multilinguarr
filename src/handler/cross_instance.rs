@@ -30,8 +30,13 @@ const OUTCOME_CREATED: &str = "created";
 const OUTCOME_ALREADY_EXISTED: &str = "already_existed";
 const OUTCOME_SKIPPED_ORIGINAL: &str = "skipped_original_language";
 const OUTCOME_ERROR: &str = "error";
-/// The series was already there, with the imported season unmonitored (MED-83).
+// The series was already there (MED-83): the imported season was monitored
+// and searched, searched only (monitored, no file yet), or not listed yet, so
+// a refresh was asked for; or the series is unmonitored and was left alone.
 const OUTCOME_SEASON_MONITORED: &str = "season_monitored";
+const OUTCOME_SEASON_SEARCHED: &str = "season_searched";
+const OUTCOME_SEASON_NOT_LISTED: &str = "season_not_listed";
+const OUTCOME_SERIES_UNMONITORED: &str = "series_unmonitored";
 
 fn record_add_outcome(source: &str, target: &str, outcome: &'static str) {
     metrics::counter!(
@@ -212,6 +217,7 @@ async fn fetch_source_series(
             .map(|s| SeasonInfo {
                 season_number: s.season_number,
                 monitored: s.monitored,
+                statistics: None,
             })
             .collect();
         Ok((seasons, series.original_language))
@@ -225,39 +231,106 @@ async fn fetch_source_series(
     }
 }
 
+/// What an import owes a target that already holds the series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeasonAction {
+    /// Nothing; the reason is the counter outcome.
+    Leave(&'static str),
+    /// Unmonitored there: monitor it, then search it.
+    MonitorAndSearch(u32),
+    /// Monitored, with no file there: search it again.
+    Search(u32),
+    /// Not listed there yet: refresh the series.
+    Refresh,
+}
+
 /// The target already holds the series. Its season monitoring was copied
 /// from the source once, at add time, and never again: a season the source
 /// monitored later stays unmonitored here, and is never searched (MED-83,
-/// Edgerunners S2). So monitor the imported season and search it.
+/// Edgerunners S2). So the imported season is monitored and searched.
 ///
-/// Specials (season 0) stay unmonitored by design, and a season the target
-/// does not list yet is left to its next refresh.
-async fn monitor_imported_season(
+/// - An unmonitored series is the operator's tombstone: left alone.
+/// - Specials (season 0) stay unmonitored by design.
+/// - A monitored season with no file is searched again. That is what makes a
+///   retry work after the monitor landed and the search failed, and it costs
+///   one search per import while no release exists (Sonarr folds a duplicate
+///   that is still queued).
+/// - A season the target does not list yet gets a refresh; its next import
+///   then takes one of the paths above.
+///
+/// An unmonitored season of a monitored series reads as "never synced", not
+/// as a choice: nothing in this lane unmonitors single seasons on purpose.
+fn season_action(existing: &crate::client::SonarrSeries, season: Option<u32>) -> SeasonAction {
+    let Some(number) = season.filter(|&n| n > 0) else {
+        return SeasonAction::Leave(OUTCOME_ALREADY_EXISTED);
+    };
+    if !existing.monitored {
+        return SeasonAction::Leave(OUTCOME_SERIES_UNMONITORED);
+    }
+    let Some(listed) = existing.seasons.iter().find(|s| s.season_number == number) else {
+        return SeasonAction::Refresh;
+    };
+    if !listed.monitored {
+        return SeasonAction::MonitorAndSearch(number);
+    }
+    match &listed.statistics {
+        Some(stats) if stats.episode_file_count == 0 => SeasonAction::Search(number),
+        _ => SeasonAction::Leave(OUTCOME_ALREADY_EXISTED),
+    }
+}
+
+/// Carry out [`season_action`] on the target; answers the counter outcome.
+async fn sync_imported_season(
     source_instance: &InstanceConfig,
     target: &InstanceConfig,
     target_sonarr: &crate::client::SonarrClient,
     existing: &crate::client::SonarrSeries,
     season: Option<u32>,
 ) -> Result<&'static str, HandlerError> {
-    let Some(number) = season.filter(|&n| n > 0) else {
-        return Ok(OUTCOME_ALREADY_EXISTED);
+    let action = season_action(existing, season);
+    let outcome = match action {
+        SeasonAction::Leave(outcome) => return Ok(outcome),
+        SeasonAction::MonitorAndSearch(number) => {
+            if !target_sonarr.monitor_season(existing.id, number).await? {
+                // Listed in the lookup, gone from the full record: a refresh
+                // raced us. Its next import starts over.
+                return Ok(OUTCOME_ALREADY_EXISTED);
+            }
+            target_sonarr.search_season(existing.id, number).await?;
+            OUTCOME_SEASON_MONITORED
+        }
+        SeasonAction::Search(number) => {
+            target_sonarr.search_season(existing.id, number).await?;
+            OUTCOME_SEASON_SEARCHED
+        }
+        SeasonAction::Refresh => {
+            target_sonarr.refresh_series(existing.id).await?;
+            OUTCOME_SEASON_NOT_LISTED
+        }
     };
-    let unmonitored = existing
-        .seasons
-        .iter()
-        .any(|s| s.season_number == number && !s.monitored);
-    if !unmonitored || !target_sonarr.monitor_season(existing.id, number).await? {
-        return Ok(OUTCOME_ALREADY_EXISTED);
-    }
-    target_sonarr.search_season(existing.id, number).await?;
     info!(
         source = %source_instance.name,
         target = %target.name,
         existing_id = existing.id,
-        season = number,
-        "series already in target with this season unmonitored — monitored it and searched"
+        ?action,
+        outcome,
+        "series already in target — synced the imported season"
     );
-    Ok(OUTCOME_SEASON_MONITORED)
+    Ok(outcome)
+}
+
+/// The source's season monitoring, with the imported season turned on: the
+/// add's own search then covers it, as `sync_imported_season` does for every
+/// later episode. Specials stay as they are.
+fn with_imported_season_monitored(seasons: &[SeasonInfo], season: Option<u32>) -> Vec<SeasonInfo> {
+    let imported = season.filter(|&n| n > 0);
+    seasons
+        .iter()
+        .map(|s| SeasonInfo {
+            monitored: s.monitored || Some(s.season_number) == imported,
+            ..s.clone()
+        })
+        .collect()
 }
 
 async fn add_series_to_target(
@@ -281,7 +354,7 @@ async fn add_series_to_target(
             "series already exists in target instance — skipping cross-instance add"
         );
         let outcome =
-            monitor_imported_season(source_instance, target, target_sonarr, &existing, season)
+            sync_imported_season(source_instance, target, target_sonarr, &existing, season)
                 .await
                 .inspect_err(|_| {
                     record_add_outcome(&source_instance.name, &target.name, OUTCOME_ERROR);
@@ -309,7 +382,7 @@ async fn add_series_to_target(
         root_folder_path: folder.path.clone(),
         season_folder: true,
         monitored: true,
-        seasons: seasons.to_vec(),
+        seasons: with_imported_season_monitored(seasons, season),
         add_options: AddSeriesOptions {
             search_for_missing_episodes: true,
         },
@@ -335,7 +408,7 @@ async fn add_series_to_target(
                 "cross-instance add_series absorbed 409 race — series already exists in target"
             );
             let outcome =
-                monitor_imported_season(source_instance, target, target_sonarr, &existing, season)
+                sync_imported_season(source_instance, target, target_sonarr, &existing, season)
                     .await
                     .inspect_err(|_| {
                         record_add_outcome(&source_instance.name, &target.name, OUTCOME_ERROR);

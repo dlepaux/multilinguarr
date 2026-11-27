@@ -42,8 +42,8 @@ pub struct RegenerateSkip {
     pub detail: String,
 }
 
-/// Why a file was left unlinked. The first four are what ffprobe found; the
-/// last two are linking rules working as designed.
+/// Why a file was left unlinked: no file at all, then what ffprobe found,
+/// then two linking rules working as designed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
@@ -648,7 +648,7 @@ fn language_skip(streams: &[AudioStream]) -> (SkipReason, String) {
     let mut tags: Vec<String> = streams
         .iter()
         .filter_map(|s| s.language.as_deref())
-        .filter(|t| !t.eq_ignore_ascii_case("und"))
+        .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("und"))
         .map(str::to_ascii_lowercase)
         .collect();
     if tags.is_empty() {
@@ -1276,6 +1276,62 @@ mod tests {
             skip.path.ends_with("Show/Season 01/S01E01.mkv"),
             "path: {}",
             skip.path
+        );
+    }
+
+    #[tokio::test]
+    async fn regenerate_names_a_movie_its_instance_does_not_serve() {
+        let tmp = TempDir::new().unwrap();
+        let storage = tmp.path().join("storage-en");
+        let library = tmp.path().join("library-en");
+        let movie_dir = storage.join("Film (2024)");
+        fs::create_dir_all(&movie_dir).await.unwrap();
+        fs::create_dir_all(&library).await.unwrap();
+        fs::write(movie_dir.join("movie.mkv"), "french")
+            .await
+            .unwrap();
+
+        let inst = make_instance("radarr-en", InstanceKind::Radarr, "en", &storage, &library);
+        let mgr = LinkManager::from_instance(&inst);
+        let detector = LanguageDetector::new(en_fr_config(), StubFfprobe(fr_only_streams()));
+        let result = regenerate_all(
+            std::slice::from_ref(&inst),
+            &detector,
+            &[(inst.name.clone(), mgr)],
+            "fr",
+            true,
+        )
+        .await;
+
+        let skip = only_skip(&result);
+        assert_eq!(skip.reason, SkipReason::LanguageNotServed);
+        assert_eq!(skip.instance, "radarr-en");
+        assert_eq!(skip.detail, "carries fr");
+    }
+
+    #[test]
+    fn language_skip_lists_each_tag_once_lowercase_and_sorted() {
+        let streams = [
+            stream(Some("KOR")),
+            stream(Some("jpn")),
+            stream(Some("kor")),
+            stream(Some("")),
+            stream(Some("und")),
+        ];
+        assert_eq!(
+            language_skip(&streams),
+            (
+                SkipReason::UnconfiguredLanguage,
+                "audio tags: jpn, kor".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn language_skip_reads_empty_tags_as_untagged() {
+        assert_eq!(
+            language_skip(&[stream(Some("")), stream(None)]),
+            (SkipReason::UntaggedAudio, String::new())
         );
     }
 
