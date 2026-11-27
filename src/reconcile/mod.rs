@@ -13,7 +13,7 @@ use tracing::info;
 use utoipa::ToSchema;
 
 use crate::config::{InstanceConfig, InstanceKind};
-use crate::detection::{DetectionResult, FfprobeProber, LanguageDetector};
+use crate::detection::{AudioStream, DetectionResult, FfprobeProber, LanguageDetector};
 use crate::link::LinkManager;
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -21,9 +21,44 @@ pub struct RegenerateResult {
     pub dry_run: bool,
     pub scanned: usize,
     pub linked: usize,
+    /// Always `skips.len()`, kept as the summary count.
     pub skipped: usize,
     pub errors: Vec<String>,
     pub actions: Vec<RegenerateAction>,
+    /// Every file (or movie folder) left unlinked, and why (MED-82).
+    pub skips: Vec<RegenerateSkip>,
+}
+
+/// One file the walk left unlinked.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RegenerateSkip {
+    /// The instance whose library goes without it.
+    pub instance: String,
+    pub path: String,
+    pub reason: SkipReason,
+    /// The facts behind the reason: the audio tags seen, the languages the
+    /// file carries, or the link that kept its slot. Empty when the reason
+    /// says it all.
+    pub detail: String,
+}
+
+/// Why a file was left unlinked. The first four are what ffprobe found; the
+/// last two are linking rules working as designed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// A movie folder holding no media file.
+    NoMediaFile,
+    /// ffprobe reported no audio stream.
+    NoAudioStream,
+    /// Every audio stream is untagged or `und`.
+    UntaggedAudio,
+    /// Tagged, but with no language in `[languages.definitions]`.
+    UnconfiguredLanguage,
+    /// An alternate instance's file without the alternate's own language.
+    LanguageNotServed,
+    /// Another release already holds this episode in the target library.
+    DuplicateKept,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -64,6 +99,7 @@ pub async fn regenerate_all<P: FfprobeProber>(
         skipped: 0,
         errors: vec![],
         actions: vec![],
+        skips: vec![],
     };
 
     let ctx = WalkCtx {
@@ -124,7 +160,13 @@ async fn regenerate_movies<P: FfprobeProber>(
         };
 
         let Some(file_path) = find_media_file(&path).await else {
-            result.skipped += 1;
+            record_skip(
+                result,
+                &instance.name,
+                &path,
+                SkipReason::NoMediaFile,
+                String::new(),
+            );
             continue;
         };
 
@@ -142,7 +184,8 @@ async fn regenerate_movies<P: FfprobeProber>(
         };
 
         if detection.languages.is_empty() {
-            result.skipped += 1;
+            let (reason, detail) = language_skip(&detection.audio_streams);
+            record_skip(result, &instance.name, &file_path, reason, detail);
             continue;
         }
 
@@ -175,6 +218,10 @@ async fn regenerate_movies<P: FfprobeProber>(
             &detection,
             ctx.primary_language,
         );
+        if targets.is_empty() {
+            record_not_served(result, instance, &file_path, &detection);
+            continue;
+        }
 
         let spec = LinkSpec {
             detection: &detection,
@@ -282,7 +329,8 @@ async fn walk_season_files<P: FfprobeProber>(
         };
 
         if detection.languages.is_empty() {
-            result.skipped += 1;
+            let (reason, detail) = language_skip(&detection.audio_streams);
+            record_skip(result, &instance.name, &file_path, reason, detail);
             continue;
         }
 
@@ -321,6 +369,10 @@ async fn walk_season_files<P: FfprobeProber>(
             &detection,
             ctx.primary_language,
         );
+        if targets.is_empty() {
+            record_not_served(result, instance, &file_path, &detection);
+            continue;
+        }
 
         let lossy = relative.to_string_lossy();
         let spec = LinkSpec {
@@ -421,14 +473,20 @@ async fn apply_links<P: FfprobeProber>(
         // duplicate the handler resolved — and would silently undo a sweep.
         let evict = match episode_conflict(mgr, ctx.all_instances, spec, target).await {
             Conflict::Proceed(evict) => evict,
-            Conflict::Skip => {
+            Conflict::Skip(kept) => {
                 metrics::counter!(
                     crate::observability::names::DUPLICATE_LINK_SKIPPED,
                     "instance" => target.name.clone(),
                     "outcome" => "skipped",
                 )
                 .increment(1);
-                result.skipped += 1;
+                record_skip(
+                    result,
+                    &target.name,
+                    spec.source_path,
+                    SkipReason::DuplicateKept,
+                    format!("kept {}", kept.display()),
+                );
                 continue;
             }
             Conflict::Failed(e) => {
@@ -488,8 +546,8 @@ async fn apply_links<P: FfprobeProber>(
 enum Conflict {
     /// Link may be created; `Some(path)` is an incumbent link to evict first.
     Proceed(Option<PathBuf>),
-    /// An incumbent release wins this library — leave it alone.
-    Skip,
+    /// The incumbent link at this path wins this library — leave it alone.
+    Skip(PathBuf),
     /// The scan itself failed; the caller records it and moves on.
     Failed(String),
 }
@@ -523,7 +581,7 @@ async fn episode_conflict(
         Ok(Some(existing)) => {
             let incumbent = owner_instance(all_instances, &existing).await;
             match crate::link::dedup_verdict(incumbent, spec.source_instance, target) {
-                crate::link::DedupVerdict::Skip => Conflict::Skip,
+                crate::link::DedupVerdict::Skip => Conflict::Skip(existing),
                 crate::link::DedupVerdict::Replace => Conflict::Proceed(Some(existing)),
                 crate::link::DedupVerdict::Link => Conflict::Proceed(None),
             }
@@ -543,6 +601,65 @@ async fn owner_instance<'a>(
     all_instances
         .iter()
         .find(|i| target.starts_with(&i.storage_path))
+}
+
+/// Record one unlinked file in the result and the log.
+fn record_skip(
+    result: &mut RegenerateResult,
+    instance: &str,
+    path: &Path,
+    reason: SkipReason,
+    detail: String,
+) {
+    info!(instance, path = %path.display(), ?reason, detail, "regenerate skipped a file");
+    result.skips.push(RegenerateSkip {
+        instance: instance.to_owned(),
+        path: path.display().to_string(),
+        reason,
+        detail,
+    });
+    result.skipped = result.skips.len();
+}
+
+fn record_not_served(
+    result: &mut RegenerateResult,
+    instance: &InstanceConfig,
+    file_path: &Path,
+    detection: &DetectionResult,
+) {
+    let detail = format!(
+        "carries {}",
+        sort_languages(&detection.languages).join(", ")
+    );
+    record_skip(
+        result,
+        &instance.name,
+        file_path,
+        SkipReason::LanguageNotServed,
+        detail,
+    );
+}
+
+/// Why ffprobe's streams yielded no configured language, with the tags seen.
+fn language_skip(streams: &[AudioStream]) -> (SkipReason, String) {
+    if streams.is_empty() {
+        return (SkipReason::NoAudioStream, String::new());
+    }
+    let mut tags: Vec<String> = streams
+        .iter()
+        .filter_map(|s| s.language.as_deref())
+        .filter(|t| !t.eq_ignore_ascii_case("und"))
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if tags.is_empty() {
+        return (SkipReason::UntaggedAudio, String::new());
+    }
+    tags.sort();
+    tags.dedup();
+    (
+        SkipReason::UnconfiguredLanguage,
+        format!("audio tags: {}", tags.join(", ")),
+    )
 }
 
 /// Sort language keys for deterministic output.
@@ -811,7 +928,7 @@ mod tests {
     /// the import handler resolved — and silently undoes a manual sweep.
     /// Returns the `TempDir` alongside the paths: dropping it would delete the
     /// tree before the caller can assert on it.
-    async fn run_dedup_regenerate(fr_first: bool) -> (TempDir, PathBuf, PathBuf) {
+    async fn run_dedup_regenerate(fr_first: bool) -> (TempDir, PathBuf, PathBuf, RegenerateResult) {
         let tmp = TempDir::new().unwrap();
         let storage_fr = tmp.path().join("storage-fr");
         let library_fr = tmp.path().join("library-fr");
@@ -863,13 +980,13 @@ mod tests {
 
         let result = regenerate_all(&instances, &detector, &managers, "fr", false).await;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        (tmp, library_en, library_fr)
+        (tmp, library_en, library_fr, result)
     }
 
     #[tokio::test]
     async fn regenerate_dedupes_episode_links_regardless_of_walk_order() {
         for fr_first in [true, false] {
-            let (_tmp, library_en, library_fr) = run_dedup_regenerate(fr_first).await;
+            let (_tmp, library_en, library_fr, _) = run_dedup_regenerate(fr_first).await;
 
             let en_native = library_en.join("Show/Season 01/S01E01.EN-EDITH.mkv");
             let en_multi = library_en.join("Show/Season 01/S01E01.MULTi-TyHD.mkv");
@@ -1045,6 +1162,142 @@ mod tests {
         assert_eq!(result.scanned, 0);
         assert_eq!(result.skipped, 1);
         assert_eq!(result.linked, 0);
+        let skip = only_skip(&result);
+        assert_eq!(skip.reason, SkipReason::NoMediaFile);
+        assert_eq!(skip.instance, "radarr-fr");
+        assert!(skip.path.ends_with("NoMedia (2024)"), "path: {}", skip.path);
+    }
+
+    // MED-82: every skip names its file and why, so a dry run can be triaged
+    // without reading the code.
+
+    fn only_skip(result: &RegenerateResult) -> &RegenerateSkip {
+        assert_eq!(
+            result.skips.len(),
+            result.skipped,
+            "count and list must agree"
+        );
+        assert_eq!(result.skips.len(), 1, "skips: {:?}", result.skips);
+        &result.skips[0]
+    }
+
+    fn stream(language: Option<&str>) -> AudioStream {
+        AudioStream {
+            language: language.map(str::to_owned),
+            channels: None,
+            is_commentary: false,
+        }
+    }
+
+    /// One radarr-fr movie whose single file probes as `streams`.
+    async fn regenerate_one_movie(streams: Vec<AudioStream>) -> (TempDir, RegenerateResult) {
+        let tmp = TempDir::new().unwrap();
+        let storage = tmp.path().join("storage");
+        let library = tmp.path().join("library");
+        let movie_dir = storage.join("Film (2024)");
+        fs::create_dir_all(&movie_dir).await.unwrap();
+        fs::create_dir_all(&library).await.unwrap();
+        fs::write(movie_dir.join("movie.mkv"), "content")
+            .await
+            .unwrap();
+
+        let inst = make_instance("radarr-fr", InstanceKind::Radarr, "fr", &storage, &library);
+        let mgr = LinkManager::from_instance(&inst);
+        let detector = LanguageDetector::new(en_fr_config(), StubFfprobe(streams));
+        let result = regenerate_all(
+            std::slice::from_ref(&inst),
+            &detector,
+            &[(inst.name.clone(), mgr)],
+            "fr",
+            true,
+        )
+        .await;
+        (tmp, result)
+    }
+
+    #[tokio::test]
+    async fn regenerate_names_a_file_without_audio_streams() {
+        let (_tmp, result) = regenerate_one_movie(vec![]).await;
+        let skip = only_skip(&result);
+        assert_eq!(skip.reason, SkipReason::NoAudioStream);
+        assert!(
+            skip.path.ends_with("Film (2024)/movie.mkv"),
+            "path: {}",
+            skip.path
+        );
+    }
+
+    #[tokio::test]
+    async fn regenerate_names_a_file_with_untagged_audio() {
+        let (_tmp, result) = regenerate_one_movie(vec![stream(None), stream(Some("und"))]).await;
+        assert_eq!(only_skip(&result).reason, SkipReason::UntaggedAudio);
+    }
+
+    #[tokio::test]
+    async fn regenerate_names_the_unconfigured_language_it_found() {
+        let (_tmp, result) =
+            regenerate_one_movie(vec![stream(Some("jpn")), stream(Some("kor"))]).await;
+        let skip = only_skip(&result);
+        assert_eq!(skip.reason, SkipReason::UnconfiguredLanguage);
+        assert_eq!(skip.detail, "audio tags: jpn, kor");
+    }
+
+    /// An alternate instance's file without the alternate's language links
+    /// nowhere; it used to vanish from the count altogether.
+    #[tokio::test]
+    async fn regenerate_names_an_episode_its_instance_does_not_serve() {
+        let tmp = TempDir::new().unwrap();
+        let storage = tmp.path().join("storage-en");
+        let library = tmp.path().join("library-en");
+        let season = storage.join("Show").join("Season 01");
+        fs::create_dir_all(&season).await.unwrap();
+        fs::create_dir_all(&library).await.unwrap();
+        fs::write(season.join("S01E01.mkv"), "french")
+            .await
+            .unwrap();
+
+        let inst = make_instance("sonarr-en", InstanceKind::Sonarr, "en", &storage, &library);
+        let mgr = LinkManager::from_instance(&inst);
+        let detector = LanguageDetector::new(en_fr_config(), StubFfprobe(fr_only_streams()));
+        let result = regenerate_all(
+            std::slice::from_ref(&inst),
+            &detector,
+            &[(inst.name.clone(), mgr)],
+            "fr",
+            true,
+        )
+        .await;
+
+        let skip = only_skip(&result);
+        assert_eq!(skip.reason, SkipReason::LanguageNotServed);
+        assert_eq!(skip.instance, "sonarr-en");
+        assert_eq!(skip.detail, "carries fr");
+        assert!(
+            skip.path.ends_with("Show/Season 01/S01E01.mkv"),
+            "path: {}",
+            skip.path
+        );
+    }
+
+    /// English walked first: its native release holds the slot, so the
+    /// French walk keeps the MULTi release out of the English library. (French
+    /// first, the native release replaces it instead, and nothing is skipped.)
+    #[tokio::test]
+    async fn regenerate_names_the_duplicate_it_keeps_out_and_the_link_it_keeps() {
+        let (_tmp, _, _, result) = run_dedup_regenerate(false).await;
+        let skip = only_skip(&result);
+        assert_eq!(skip.reason, SkipReason::DuplicateKept);
+        assert_eq!(skip.instance, "sonarr-en");
+        assert!(
+            skip.path.ends_with("S01E01.MULTi-TyHD.mkv"),
+            "path: {}",
+            skip.path
+        );
+        assert!(
+            skip.detail.ends_with("Show/Season 01/S01E01.EN-EDITH.mkv"),
+            "detail: {}",
+            skip.detail
+        );
     }
 
     #[tokio::test]

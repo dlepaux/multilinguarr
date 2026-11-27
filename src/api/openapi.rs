@@ -57,6 +57,8 @@ use utoipa::OpenApi;
         crate::queue::QueueStats,
         crate::reconcile::RegenerateResult,
         crate::reconcile::RegenerateAction,
+        crate::reconcile::RegenerateSkip,
+        crate::reconcile::SkipReason,
     )),
     tags(
         (name = "languages", description = "Language definitions"),
