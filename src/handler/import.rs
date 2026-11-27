@@ -493,7 +493,14 @@ async fn dispatch_sonarr_link<P: FfprobeProber>(
             episode,
         )
         .await?;
-        propagate_add_series(registry, instance, series_ref, &detection.languages).await?;
+        propagate_add_series(
+            registry,
+            instance,
+            series_ref,
+            &detection.languages,
+            episode.map(|(season, _)| season),
+        )
+        .await?;
     } else {
         link_sonarr_alternate(
             registry,

@@ -1280,7 +1280,7 @@ mod tests {
     }
 
     /// English walked first: its native release holds the slot, so the
-    /// French walk keeps the MULTi release out of the English library. (French
+    /// French walk keeps the `MULTi` release out of the English library. (French
     /// first, the native release replaces it instead, and nothing is skipped.)
     #[tokio::test]
     async fn regenerate_names_the_duplicate_it_keeps_out_and_the_link_it_keeps() {

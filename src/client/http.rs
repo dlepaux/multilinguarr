@@ -153,6 +153,21 @@ impl HttpCore {
             .await
     }
 
+    /// PUT a JSON body to an endpoint and deserialize the JSON response.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ArrError` on network failure, timeout, non-success HTTP
+    /// status, or JSON deserialization failure.
+    pub async fn put_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        body: &B,
+    ) -> Result<T, ArrError> {
+        self.execute_json::<_, T>(Method::PUT, endpoint, Some(body))
+            .await
+    }
+
     /// DELETE an endpoint, discarding the response body.
     ///
     /// # Errors

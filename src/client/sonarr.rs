@@ -10,6 +10,7 @@ const PATH_SERIES: &str = "/api/v3/series";
 const PATH_EPISODE_FILE: &str = "/api/v3/episodefile";
 const PATH_QUALITY_PROFILE: &str = "/api/v3/qualityprofile";
 const PATH_ROOT_FOLDER: &str = "/api/v3/rootfolder";
+const PATH_COMMAND: &str = "/api/v3/command";
 
 /// An episode file — used for audio language detection.
 #[derive(Debug, Clone, Deserialize)]
@@ -173,6 +174,57 @@ impl SonarrClient {
     pub async fn delete_series(&self, id: u32, delete_files: bool) -> Result<(), ArrError> {
         let endpoint = format!("{PATH_SERIES}/{id}?deleteFiles={delete_files}");
         self.http.delete(&endpoint).await
+    }
+
+    /// Monitor one season of a series. Returns `Ok(false)` when the series
+    /// has no such season yet.
+    ///
+    /// The series goes back as the raw resource Sonarr served, with only that
+    /// season's flag changed: a typed round-trip would drop every field this
+    /// client does not model (tags, `monitorNewItems`, …) and Sonarr's PUT
+    /// replaces the whole resource. Sonarr monitors the season's episodes
+    /// along with it, as the UI's season toggle does.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ArrError` on network, HTTP, or deserialization failure.
+    pub async fn monitor_season(
+        &self,
+        series_id: u32,
+        season_number: u32,
+    ) -> Result<bool, ArrError> {
+        let endpoint = format!("{PATH_SERIES}/{series_id}");
+        let mut series: serde_json::Value = self.http.get_json(&endpoint).await?;
+        let season = series
+            .get_mut("seasons")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|seasons| {
+                seasons.iter_mut().find(|s| {
+                    s.get("seasonNumber").and_then(serde_json::Value::as_u64)
+                        == Some(u64::from(season_number))
+                })
+            });
+        let Some(season) = season else {
+            return Ok(false);
+        };
+        season["monitored"] = serde_json::Value::Bool(true);
+        let _: serde_json::Value = self.http.put_json(&endpoint, &series).await?;
+        Ok(true)
+    }
+
+    /// Ask Sonarr to search every monitored episode of one season.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ArrError` on network, HTTP, or deserialization failure.
+    pub async fn search_season(&self, series_id: u32, season_number: u32) -> Result<(), ArrError> {
+        let body = serde_json::json!({
+            "name": "SeasonSearch",
+            "seriesId": series_id,
+            "seasonNumber": season_number,
+        });
+        let _: serde_json::Value = self.http.post_json(PATH_COMMAND, &body).await?;
+        Ok(())
     }
 
     /// Fetch all episode files for a given series.

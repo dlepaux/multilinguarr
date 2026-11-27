@@ -652,6 +652,144 @@ async fn sonarr_primary_foreign_original_still_cross_adds() {
     assert!(posted_to(&rig.alt_server, "/api/v3/series").await);
 }
 
+// MED-83 (2026-11-27): the alternate already holds the series, with the
+// season being imported unmonitored (Edgerunners S2, fre+jpn, in Sonarr-EN).
+// The add is a no-op there, so the season must be monitored and searched.
+
+/// Mount the alternate's copy of the series, id 30, with season 1 monitored
+/// as given. The full-resource GET carries fields the PUT must hand back.
+async fn mount_sonarr_existing_on_alt(server: &MockServer, season_1_monitored: bool) {
+    let series = json!({
+        "id": 30,
+        "title": "Show",
+        "tvdbId": 81189,
+        "qualityProfileId": 7,
+        "seasonFolder": true,
+        "monitored": true,
+        "monitorNewItems": "all",
+        "tags": [3],
+        "seasons": [
+            { "seasonNumber": 0, "monitored": false },
+            { "seasonNumber": 1, "monitored": season_1_monitored }
+        ]
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v3/series"))
+        .and(query_param("tvdbId", "81189"))
+        .and(header("X-Api-Key", "k2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([series.clone()])))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/series/30"))
+        .and(header("X-Api-Key", "k2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(series.clone()))
+        .mount(server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v3/series/30"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(series))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v3/command"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 1 })))
+        .mount(server)
+        .await;
+}
+
+/// Bodies of the requests `server` received with this method and path.
+async fn bodies(server: &MockServer, verb: &str, api_path: &str) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method.as_str() == verb && r.url.path() == api_path)
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect()
+}
+
+async fn import_fr_only_episode_of_season(rig: &Rig, season: u32) {
+    let series_dir = rig.primary_storage.join("Show");
+    write_episode_file(&series_dir, "fr-only").await;
+    mount_sonarr_source_series(&rig.primary_server, "k1").await;
+
+    let cfg = rig.config_sonarr();
+    let primary = cfg.instances[0].clone();
+    let episode_path = series_dir.join("Season 01/S01E01.mkv");
+    let mut event =
+        sonarr_download_event(series_dir.to_str().unwrap(), episode_path.to_str().unwrap());
+    event.episodes[0].season_number = season;
+    let registry = Rig::registry(cfg, fr_only_streams());
+
+    handle_sonarr_download(&primary, &event, &registry)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn sonarr_primary_import_monitors_and_searches_the_season_an_existing_alternate_lacks() {
+    let rig = Rig::new().await;
+    mount_sonarr_existing_on_alt(&rig.alt_server, false).await;
+
+    import_fr_only_episode_of_season(&rig, 1).await;
+
+    let puts = bodies(&rig.alt_server, "PUT", "/api/v3/series/30").await;
+    assert_eq!(puts.len(), 1, "one season update");
+    let put = &puts[0];
+    assert_eq!(
+        put["seasons"][1],
+        json!({ "seasonNumber": 1, "monitored": true })
+    );
+    assert_eq!(
+        put["seasons"][0]["monitored"],
+        json!(false),
+        "specials stay as they were"
+    );
+    assert_eq!(
+        put["monitorNewItems"],
+        json!("all"),
+        "the rest of the series goes back unchanged"
+    );
+    assert_eq!(put["tags"], json!([3]));
+
+    let commands = bodies(&rig.alt_server, "POST", "/api/v3/command").await;
+    assert_eq!(
+        commands,
+        vec![json!({ "name": "SeasonSearch", "seriesId": 30, "seasonNumber": 1 })]
+    );
+    assert!(
+        !posted_to(&rig.alt_server, "/api/v3/series").await,
+        "never a second add"
+    );
+}
+
+#[tokio::test]
+async fn sonarr_primary_import_leaves_an_already_monitored_season_alone() {
+    let rig = Rig::new().await;
+    mount_sonarr_existing_on_alt(&rig.alt_server, true).await;
+
+    import_fr_only_episode_of_season(&rig, 1).await;
+
+    let puts = bodies(&rig.alt_server, "PUT", "/api/v3/series/30").await;
+    assert_eq!(puts.len(), 0, "no season update: {puts:?}");
+    assert!(!posted_to(&rig.alt_server, "/api/v3/command").await);
+}
+
+/// Specials stay unmonitored by design: importing one never turns them on.
+#[tokio::test]
+async fn sonarr_primary_import_of_a_special_never_monitors_specials() {
+    let rig = Rig::new().await;
+    mount_sonarr_existing_on_alt(&rig.alt_server, false).await;
+
+    import_fr_only_episode_of_season(&rig, 0).await;
+
+    let puts = bodies(&rig.alt_server, "PUT", "/api/v3/series/30").await;
+    assert_eq!(puts.len(), 0, "no season update: {puts:?}");
+    assert!(!posted_to(&rig.alt_server, "/api/v3/command").await);
+}
+
 #[tokio::test]
 async fn sonarr_alternate_multi_audio_links_alternate_only() {
     let rig = Rig::new().await;

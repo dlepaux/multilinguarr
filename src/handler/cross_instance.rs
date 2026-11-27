@@ -30,6 +30,8 @@ const OUTCOME_CREATED: &str = "created";
 const OUTCOME_ALREADY_EXISTED: &str = "already_existed";
 const OUTCOME_SKIPPED_ORIGINAL: &str = "skipped_original_language";
 const OUTCOME_ERROR: &str = "error";
+/// The series was already there, with the imported season unmonitored (MED-83).
+const OUTCOME_SEASON_MONITORED: &str = "season_monitored";
 
 fn record_add_outcome(source: &str, target: &str, outcome: &'static str) {
     metrics::counter!(
@@ -223,12 +225,48 @@ async fn fetch_source_series(
     }
 }
 
+/// The target already holds the series. Its season monitoring was copied
+/// from the source once, at add time, and never again: a season the source
+/// monitored later stays unmonitored here, and is never searched (MED-83,
+/// Edgerunners S2). So monitor the imported season and search it.
+///
+/// Specials (season 0) stay unmonitored by design, and a season the target
+/// does not list yet is left to its next refresh.
+async fn monitor_imported_season(
+    source_instance: &InstanceConfig,
+    target: &InstanceConfig,
+    target_sonarr: &crate::client::SonarrClient,
+    existing: &crate::client::SonarrSeries,
+    season: Option<u32>,
+) -> Result<&'static str, HandlerError> {
+    let Some(number) = season.filter(|&n| n > 0) else {
+        return Ok(OUTCOME_ALREADY_EXISTED);
+    };
+    let unmonitored = existing
+        .seasons
+        .iter()
+        .any(|s| s.season_number == number && !s.monitored);
+    if !unmonitored || !target_sonarr.monitor_season(existing.id, number).await? {
+        return Ok(OUTCOME_ALREADY_EXISTED);
+    }
+    target_sonarr.search_season(existing.id, number).await?;
+    info!(
+        source = %source_instance.name,
+        target = %target.name,
+        existing_id = existing.id,
+        season = number,
+        "series already in target with this season unmonitored — monitored it and searched"
+    );
+    Ok(OUTCOME_SEASON_MONITORED)
+}
+
 async fn add_series_to_target(
     source_instance: &InstanceConfig,
     target: &InstanceConfig,
     target_sonarr: &crate::client::SonarrClient,
     series_ref: &SonarrSeriesRef,
     seasons: &[SeasonInfo],
+    season: Option<u32>,
 ) -> Result<(), HandlerError> {
     // Optimisation: skip the POST→409 round-trip when we already
     // know the series exists. Correctness no longer depends on it.
@@ -242,7 +280,13 @@ async fn add_series_to_target(
             existing_id = existing.id,
             "series already exists in target instance — skipping cross-instance add"
         );
-        record_add_outcome(&source_instance.name, &target.name, OUTCOME_ALREADY_EXISTED);
+        let outcome =
+            monitor_imported_season(source_instance, target, target_sonarr, &existing, season)
+                .await
+                .inspect_err(|_| {
+                    record_add_outcome(&source_instance.name, &target.name, OUTCOME_ERROR);
+                })?;
+        record_add_outcome(&source_instance.name, &target.name, outcome);
         return Ok(());
     }
 
@@ -290,7 +334,13 @@ async fn add_series_to_target(
                 existing_id = existing.id,
                 "cross-instance add_series absorbed 409 race — series already exists in target"
             );
-            record_add_outcome(&source_instance.name, &target.name, OUTCOME_ALREADY_EXISTED);
+            let outcome =
+                monitor_imported_season(source_instance, target, target_sonarr, &existing, season)
+                    .await
+                    .inspect_err(|_| {
+                        record_add_outcome(&source_instance.name, &target.name, OUTCOME_ERROR);
+                    })?;
+            record_add_outcome(&source_instance.name, &target.name, outcome);
             Ok(())
         }
         Err(err) => {
@@ -303,11 +353,14 @@ async fn add_series_to_target(
 /// Add a series to every Sonarr instance whose configured language is
 /// different from `source_instance`. Copies season monitoring from the
 /// source instance so all monitored seasons are searched on the target.
+/// Where the target already holds the series, `season` (the imported
+/// episode's) is monitored and searched there instead.
 pub async fn propagate_add_series<P: FfprobeProber>(
     registry: &HandlerRegistry<P>,
     source_instance: &InstanceConfig,
     series_ref: &SonarrSeriesRef,
     detected_languages: &std::collections::HashSet<String>,
+    season: Option<u32>,
 ) -> Result<(), HandlerError> {
     // See `propagate_add_movie`: never ask a sibling to grab a language the
     // imported file already carries.
@@ -342,7 +395,15 @@ pub async fn propagate_add_series<P: FfprobeProber>(
         let ArrClient::Sonarr(target_sonarr) = target_client else {
             continue;
         };
-        add_series_to_target(source_instance, target, target_sonarr, series_ref, &seasons).await?;
+        add_series_to_target(
+            source_instance,
+            target,
+            target_sonarr,
+            series_ref,
+            &seasons,
+            season,
+        )
+        .await?;
     }
     Ok(())
 }
